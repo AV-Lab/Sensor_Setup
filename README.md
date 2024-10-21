@@ -1,8 +1,5 @@
 # Sensor_Setup
-Code to configure, test and start sensors : Camera and Lidar
-
-# zed_ouster_setup
-ROS2 package for zed2 camera and ouster lidar 
+ROS2 package to configure, test and start sensors : Camera and Lidar ( zed2 camera and ouster lidar)
 
 # Quick start
 - Build and source  
