@@ -4,7 +4,7 @@ ROS2 package to configure, test and start sensors : Camera and Lidar ( zed2 came
 # Quick start
 - Build and source  
     ``` 
-    cd /ros2_package  
+    cd /ros2_package  && colcon build
     ```  
     ```
     source install/setup.bash 
