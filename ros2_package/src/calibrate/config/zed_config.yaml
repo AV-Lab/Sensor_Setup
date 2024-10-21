@@ -1,0 +1,18 @@
+# zed_config.yaml
+
+camera:
+  id: 0  # Camera ID (change if necessary)
+  fps: 20  # Frames per second
+  resolution: HD1080  # Options: VGA, HD720, HD1080, HD2K
+  depth_mode: NONE  # Options: NONE, PERFORMANCE, QUALITY, ULTRA
+
+topic:
+  name: '/zed_image_raw'
+  queue_size: 10
+
+qos:
+  reliability: BEST_EFFORT  # Options: RELIABLE, BEST_EFFORT
+  history: KEEP_LAST  # Options: KEEP_LAST, KEEP_ALL
+  depth: 1
+
+frame_id: 'zed_camera_frame'

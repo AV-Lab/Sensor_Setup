@@ -1,0 +1,31 @@
+# ouster_config.yaml
+
+sensor:
+  host_name: 'os-122130000681.local'  # Replace with your Ouster LiDAR IP
+  udp_port_lidar: 7502
+  udp_port_imu: 7503
+
+lidar:
+  # fps: 20.0 taken from mode
+  frame_id: 'os_sensor'
+  azimuth_window: [90000, 270000]  # [start_angle, end_angle] in millidegrees  # [start_angle, end_angle] in millidegrees
+  phase_lock_enable: false # allow scan to start with offset, False if TIME_FROM_INTERNAL_OSC
+  phase_lock_offset: 180000  # 180 degrees (front) in millidegrees
+  mode:  "1024x20"  #"512x20"  
+  timestamp_mode: "System_Time" #"TIME_FROM_INTERNAL_OSC" # "TIME_FROM_PTP_1588" -> ptp based  # Use PTP for time synchronization 
+  info_mode: "detailed" # minimal , empty -> setup info print  
+   # Available modes: 
+        # - "512x10"
+        # - "512x20"
+        # - "1024x10" -> Default
+        # - "1024x20"
+        # - "2048x10"
+
+topic:
+  name: '/ouster/lidar_points'
+  queue_size: 5
+
+qos:
+  reliability: BEST_EFFORT  # Options: RELIABLE, BEST_EFFORT
+  history: KEEP_LAST  # Options: KEEP_LAST, KEEP_ALL
+  depth: 5
