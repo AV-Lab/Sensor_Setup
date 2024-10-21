@@ -3,22 +3,34 @@ ROS2 package to configure, test and start sensors : Camera and Lidar ( zed2 came
 
 # Quick start
 - Build and source  
-    ```cd /ros2_package ```
-    ```source install/setup.bash ```
+    ``` 
+    cd /ros2_package  
+    ```  
+    ```
+    source install/setup.bash 
+    ```
 
-- To start ouster lidar:  
-```ros2 run calibrate ouster_node --ros-args --remap use_sim_time:=false```
+- To start ouster lidar:   
+    ```
+    ros2 run calibrate ouster_node --ros-args --remap use_sim_time:=false
+    ```
 
 
 - To run zed camera:  
-```ros2 run calibrate zed_node --ros-args --remap use_sim_time:=false```
+    ```
+    ros2 run calibrate zed_node --ros-args --remap use_sim_time:=false  
+    ```
 
 
 - To Save synchronized samples from rosbag  
-```ros2 run calibrate save_node   100 'images_x' 'pcds_x' 10 10 1 --ros-args -p use_sim_time:=true```
+    ``` 
+    ros2 run calibrate save_node   100 'images_x' 'pcds_x' 10 10 1 --ros-args -p use_sim_time:=true
+    ```
  
 - To Save synchronized samples from sensors (real-time)  
-    ```ros2 run calibrate save_node   100 'images_x' 'pcds_x' 10 10 1 --ros-args -p use_sim_time:=false```
+    ```
+    ros2 run calibrate save_node   100 'images_x' 'pcds_x' 10 10 1 --ros-args -p use_sim_time:=false
+    ```
  
 
     ros2 run calibrate save_node   --num_saves --image_folder pcd_folder --set_size  --set_delay --frame_delay --ros-args -p use_sim_time:=true 
