@@ -9,7 +9,10 @@ ROS2 package to configure, test and start sensors : Camera and Lidar ( zed2 came
     ```
     source install/setup.bash 
     ```
-
+- To start both sensors with one launch file use the following command:
+```
+ros2 launch calibrate launch_all_sensors.launch.py 
+```
 - To start ouster lidar:   
     ```
     ros2 run calibrate ouster_node --ros-args --remap use_sim_time:=false
@@ -92,6 +95,9 @@ ROS2 package to configure, test and start sensors : Camera and Lidar ( zed2 came
 ### Important Notes
  
 - Ensure all nodes are using the same time source during recording and playback.
-- For nodes created after bag playback starts, set `use_sim_time` parameter in the node's constructor.
-- If using launch files, set `use_sim_time` parameter for each node in the launch file.
-- Verify time settings with `ros2 param get /your_node use_sim_time`.
+
+- For nodes created after bag playback starts, set ` use_sim_time ` parameter in the node's constructor.
+
+- If using launch files, set ` use_sim_time ` parameter for each node in the launch file.
+
+- Verify time settings with ` ros2 param get /your_node use_sim_time `.
