@@ -37,7 +37,7 @@ ROS2 package to configure, test and start sensors : Camera and Lidar ( zed2 came
       -  Z - forward (depth)
 
 ## Steps for Consistent Timestamps in ROS2 Rosbags
- - If you plan to record a rosbag and to replay it with the same timestamp follow the following instructions
+ - If you plan to record a rosbag and to replay it with the same timestamp follow the following instructions:
 
 ### Recording
  
