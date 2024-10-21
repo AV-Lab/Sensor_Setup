@@ -10,9 +10,9 @@ ROS2 package to configure, test and start sensors : Camera and Lidar ( zed2 came
     source install/setup.bash 
     ```
 - To start both sensors with one launch file use the following command:
-```
-ros2 launch calibrate launch_all_sensors.launch.py 
-```
+    ```
+    ros2 launch calibrate launch_all_sensors.launch.py 
+    ```
 - To start ouster lidar:   
     ```
     ros2 run calibrate ouster_node --ros-args --remap use_sim_time:=false
