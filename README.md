@@ -4,14 +4,14 @@ ROS2 package to configure, test and start sensors : Camera and Lidar ( zed2 came
 # Quick start
 - Build and source  
     ``` 
-    cd /ros2_package  && colcon build
+    cd ros2_package  && colcon build
     ```  
     ```
     source install/setup.bash 
     ```
 - To start both sensors with one launch file use the following command:
     ```
-    ros2 launch calibrate launch_all_sensors.launch.py 
+    ros2 launch calibrate launch_all_sensors.py 
     ```
 - To start ouster lidar:   
     ```
