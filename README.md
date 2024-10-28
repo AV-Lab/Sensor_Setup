@@ -2,9 +2,21 @@
 ROS2 package to configure, test and start sensors : Camera and Lidar ( zed2 camera and ouster lidar)
 
 # Quick start
+- Create a ROS2 workspace
+   ```
+   mkdir ~/ros2_ws
+   cd ~/ros2_ws
+   mkdir src
+   cd src 
+   ```  
+- clone the repository inside src folder
+
+   ```
+   git clone https://github.com/AV-Lab/Sensor_Setup 
+   ```
 - Build and source  
     ``` 
-    cd ros2_package  && colcon build
+    cd ros2_ws  && colcon build
     ```  
     ```
     source install/setup.bash 
