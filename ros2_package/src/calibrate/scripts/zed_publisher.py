@@ -9,6 +9,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 import yaml
 import os
 from ament_index_python.packages import get_package_share_directory
+import numpy as np
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSDurabilityPolicy, QoSHistoryPolicy
 from rclpy.qos import QoSLivelinessPolicy
 
@@ -25,8 +26,12 @@ class ZEDCameraPublisher(Node):
         with open(config_path, 'r') as config_file:
             self.config = yaml.safe_load(config_file)
         
-        self.timestamp = self.config['']
+        self.timestamp = self.config['camera']['timestamp_mode']
+        
+        self.camera_info = CameraInfo()
         self.get_camera_info()
+        self.camera_k = np.array(self.config['intrinsics']['camera_matrix_K']).reshape(-1,3)
+        self.camera_distortion =  np.array(self.config['intrinsics']['distortion'])
 
         self.zed = sl.Camera()
         self.bridge = CvBridge()
@@ -84,66 +89,47 @@ class ZEDCameraPublisher(Node):
             else:
                 frame_rgb = frame
 
-            
-            image_timestamp =  self.get_clock().now().to_msg()#self.zed.get_timestamp(sl.TIME_REFERENCE.IMAGE)
+            if self.timestamp == sl.TIME_REFERENCE.IMAGE:
+                image_timestamp  =  self.zed.get_timestamp(sl.TIME_REFERENCE.IMAGE).get_nanoseconds()
+            elif self.timestamp == sl.TIME_REFERENCE.CURRENT:
+                image_timestamp = self.zed.get_timestamp(sl.TIME_REFERENCE.CURRENT).get_nanoseconds()
+            else:
+                image_timestamp =  self.get_clock().now().to_msg()
 
-            image_msg = self.bridge.cv2_to_imgmsg(frame_rgb, "bgr8")
+            undistorted_img = cv2.undistort(frame_rgb, self.camera_k,  self.camera_distortion)
+            image_msg = self.bridge.cv2_to_imgmsg(undistorted_img, "bgr8") 
 
             header = Header()
-            header.frame_id = self.config['frame_id']
+            header.frame_id = self.config['ROS']['frame_id']
             header.stamp = image_timestamp
-            # header.stamp.sec = int(image_timestamp.get_seconds())
-            # header.stamp.nanosec = int((image_timestamp.get_seconds() - int(image_timestamp.get_seconds())) * 1e9)
 
+            
             image_msg.header = header
-
             self.image_publisher.publish(image_msg)
+
             # Publish camera info
             self.camera_info.header.stamp = image_timestamp
-            # self.camera_info.header.stamp.sec = int(image_timestamp.get_seconds())
-            # self.camera_info.header.stamp.nanosec = int((image_timestamp.get_seconds() - int(image_timestamp.get_seconds())) * 1e9)
             self.camera_info_publisher.publish(self.camera_info)
-            # self.get_logger().info(f"Published Zed Timestamp: {header.stamp.sec}.{header.stamp.nanosec}")
-            self.get_logger().info(f"Published image with timestamp: {header.stamp.sec}.{header.stamp.nanosec}")
+            # self.get_logger().info(f"Published image with timestamp: {header.stamp.sec}.{header.stamp.nanosec}")
 
     def get_camera_info(self):
-        self.camera_info = CameraInfo()
-        self.camera_info.header.frame_id = "zed_camera_frame"
         
-        # Use the provided values
-        fx = 1153.806674
-        fy = 1156.223082
-        cx = 942.859434
-        cy = 536.992462
+        self.camera_info.header.frame_id = self.config['ROS']['frame_id']
         
-        self.camera_info.height =1080 #self.zed.get_camera_information().camera_resolution.height
-        self.camera_info.width = 1920 #self.zed.get_camera_information().camera_resolution.width
-        
-        # Intrinsic matrix K
-        # self.camera_info.k = [fx,  0, cx,
-        #                 0, fy, cy,
-        #                 0,  0,  1]
+        self.camera_info.height = self.config['camera']['height']  
+        self.camera_info.width = self.config['camera']['width'] 
         
         # Set intrinsic matrix K
-        self.camera_info.k = [float(fx), 0.0, float(cx),
-                      0.0, float(fy), float(cy),
-                      0.0, 0.0, 1.0]
-
-        
+        self.camera_info.k = self.config['intrinsics']['camera_matrix_K']
+    
         # Distortion coefficients
-        # Since we don't have specific distortion coefficients, we'll set them to zero
-        self.camera_info.d = [0.0, 0.0, 0.0, 0.0, 0.0]
+        self.camera_info.d = self.config['intrinsics']['distortion']
         
         # Rectification matrix (identity for monocular cameras)
-        self.camera_info.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+        self.camera_info.r = self.config['intrinsics']['rectification']
         
         # Projection matrix P
-        self.camera_info.p = [float(fx),  0.0,  float(cx), 0.0,
-                      0.0,  float(fy),  float(cy), 0.0,
-                      0.0,  0.0,  1.0,  0.0]
-
-        
-
+        self.camera_info.p = self.config['intrinsics']['projection']
         
         self.camera_info.distortion_model = "plumb_bob"
     

@@ -1,19 +1,36 @@
 # zed_config.yaml
 
+# zed_config.yaml
+
 camera:
   id: 0  # Camera ID (change if necessary)
   fps: 20  # Frames per second
   resolution: HD1080  # Options: VGA, HD720, HD1080, HD2K
+  height: 1080
+  width: 1920
   depth_mode: NONE  # Options: NONE, PERFORMANCE, QUALITY, ULTRA
-  INT
+  timestamp_mode: "System_Time"  # sl.TIME_REFERENCE.IMAGE , sl.TIME_REFERENCE.CURRENT
+  
+  # sl.TIME_REFERENCE.CURRENT: To get the current timestamp at the time of the function call
+  # sl.TIME_REFERENCE.IMAGE: To get the timestamp of the last captured image
 
-topic:
-  name: '/image_raw'
+ROS:
+  topic_name: '/image_raw'
   queue_size: 10
+  frame_id: 'camera_frame'
+  camera_info_topic: '/camera_info'
+  
 
 qos:
   reliability: BEST_EFFORT  # Options: RELIABLE, BEST_EFFORT
   history: KEEP_LAST  # Options: KEEP_LAST, KEEP_ALL
   depth: 1
 
-frame_id: 'camera_frame'
+
+
+intrinsics:
+  distortion : [0.0, 0.0, 0.0, 0.0, 0.0] #[0.0488070884, 0.022004654324, -0.004301141, -0.00607552, 0.0]
+  # K : [1082.1380163231088, 0.0, 955.7548539266769, 0.0, 1079.8428945634496, 542.8565194184407, 0.0, 0.0, 1.0]
+  camera_matrix_K: [1108.145514, 0.0, 980.526233, 0.0 , 1109.205787, 546.265441, 0.0, 0.0, 1.0] # From camera coordinate to image 
+  rectification : [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+  projection : [1153.8066743036266, 0.0, 942.8594337266868, 0.0, 0.0, 1156.2230817932277, 536.9924624856126, 0.0, 0.0, 0.0, 1.0, 0.0] # From world to image
