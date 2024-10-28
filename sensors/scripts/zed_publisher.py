@@ -71,7 +71,7 @@ class ZEDCameraPublisher(Node):
     
     def load_yaml_file(self):
         # Get the directory of the package's shared files
-        package_share_directory = get_package_share_directory('calibrate')
+        package_share_directory = get_package_share_directory('sensors')
         
         # Construct the path to 'zed_config.yaml' in the 'config' directory
         config_file_path = os.path.join(package_share_directory, 'config', 'zed_config.yaml')
