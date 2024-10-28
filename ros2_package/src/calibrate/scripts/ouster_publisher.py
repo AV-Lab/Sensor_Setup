@@ -15,26 +15,11 @@ from rclpy.time import Time
 from ament_index_python.packages import get_package_share_directory
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSDurabilityPolicy, QoSHistoryPolicy
 from rclpy.qos import QoSLivelinessPolicy
-# # # PATH 
-# FILE = Path(__file__).resolve()
-# ROOT = FILE.parents[0]  
-# if str(ROOT) not in sys.path:
-#     sys.path.append(str(ROOT))  # add ROOT to PATH
-# ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
+
 
 class OusterLidarPublisher(Node):
     def __init__(self, args=None):
         super().__init__("ouster_lidar_publisher")
-        # sensor_qos = QoSProfile(
-        #     reliability=QoSReliabilityPolicy.BEST_EFFORT,
-        #     durability=QoSDurabilityPolicy.VOLATILE,
-        #     history=QoSHistoryPolicy.KEEP_LAST,
-        #     depth=2,
-        #     # liveliness=QoSLivelinessPolicy.AUTOMATIC,
-        #     # deadline=rclpy.duration.Duration(seconds=0.1),
-        #     # lifespan=rclpy.duration.Duration(seconds=0.5),
-        # )
-
 
         use_sim_time = self.get_parameter('use_sim_time').get_parameter_value().bool_value
         self.get_logger().info(f'use_sim_time is set to: {use_sim_time}')
@@ -52,17 +37,11 @@ class OusterLidarPublisher(Node):
             "TIME_FROM_INTERNAL_OSC": client.TimestampMode.TIME_FROM_INTERNAL_OSC,
             "TIME_FROM_PTP_1588": client.TimestampMode.TIME_FROM_PTP_1588,
             "TIME_FROM_SYNC_PULSE_IN": client.TimestampMode.TIME_FROM_SYNC_PULSE_IN,
-            "System_Time"   : "system time" 
         }
         
-        # # Load configuration
-        # config_path = args.config_path if args else "ouster_config.yaml"
-        # with open(config_path, "r") as f:
-        #     self.config_file = yaml.safe_load(f)
 
-
+        # Load configuration
         config_path = self.load_yaml_file()
-        print("config_path: ",config_path)
         with open(config_path, 'r') as config_file:
             self.config_file = yaml.safe_load(config_file)  
 
@@ -73,12 +52,12 @@ class OusterLidarPublisher(Node):
         self.hostname = self.config_file['sensor']['host_name']
         self.config.operating_mode = client.OperatingMode.OPERATING_NORMAL
         self.lidar_mode_str = self.config_file['lidar']['mode']
-
-        # Set timestamp mode (required for phase lock)
         self.timestamp_mode_str = self.config_file['lidar'].get('timestamp_mode', 'TIME_FROM_PTP_1588')
-      
-        # self.config.timestamp_mode = 'system'#timestamp_mode_map.get(self.timestamp_mode_str, client.TimestampMode.TIME_FROM_PTP_1588)
-                # Set Azimuth Window
+        self.timestamp_mode = timestamp_mode_map.get(self.timestamp_mode_str, client.TimestampMode.TIME_FROM_PTP_1588)
+        
+        # Set timestamp mode (required for phase lock) 
+        self.config.timestamp_mode = self.timestamp_mode
+        # Set Azimuth Window
         self.config.azimuth_window = self.config_file['lidar'].get('azimuth_window', [0, 360000])
         # Set Phase Lock -> Scan start point
         self.config.phase_lock_enable = self.config_file['lidar'].get('phase_lock_enable', True)
@@ -87,7 +66,7 @@ class OusterLidarPublisher(Node):
         self.config.lidar_mode = self.lidar_mode_map.get( self.lidar_mode_str, client.LidarMode.MODE_1024x10)
         # Set FPS based on the lidar mode
         self.fps = int( self.lidar_mode_str.split('x')[1])
-        # print(f" ---------Lidar mode { self.lidar_mode_str } @ {self.fps} Hz! ")
+       
         # QoS profile
         qos_profile = rclpy.qos.QoSProfile(
             reliability=getattr(rclpy.qos.QoSReliabilityPolicy, self.config_file['qos']['reliability']),
@@ -102,17 +81,10 @@ class OusterLidarPublisher(Node):
         self.publisher = self.create_publisher(
             PointCloud2, 
             self.config_file['topic']['name'], 
-            5
+            qos_profile # self.config_file['topic']['depth']
         )
         # self.create_timer(1.0 / self.fps, self.publish_pointcloud)
         self.metadata = self.source.metadata
-        # self.get_logger().info(f"Lidar Mode : {self.source.metadata.mode}")
-
-        # Get the timestamp mode
-        self.timestamp_mode = self.get_timestamp_mode()
-        # self.get_logger().info(f"Timestamp mode: {self.timestamp_mode}")
-        
-
 
         # set up details print
         print_mode =  self.config_file['lidar']['info_mode']
@@ -164,7 +136,7 @@ class OusterLidarPublisher(Node):
         
         self.get_logger().info(f"Sensor IP: {self.metadata.hostname}")
         self.get_logger().info(f"Data Destination: {self.config.udp_dest}")
-        self.get_logger().info(f"Timestamp Mode: {self.timestamp_mode}")
+        self.get_logger().info(f"Timestamp Mode: {self.config_file['lidar']['timestamp_mode']}")
     def get_timestamp_mode(self):
         try:
             info = client.get_config(self.hostname)
@@ -180,6 +152,7 @@ class OusterLidarPublisher(Node):
         config_file_path = os.path.join(package_share_directory, 'config', 'ouster_config.yaml')
         
         return config_file_path
+    
     def publish_pointcloud(self):
         with closing(client.Scans(self.source)) as scans:
             self.get_logger().info(f"Scan opened: {self.timestamp_mode}")
@@ -187,6 +160,7 @@ class OusterLidarPublisher(Node):
             for scan in scans:
                 # Read XYZ and intensity fields from the scan
                 xyz = client.XYZLut(self.metadata)(scan)  # XYZ points
+                
                 intensity = scan.field(client.ChanField.REFLECTIVITY)  # Intensity field
 
                 # Reshape XYZ and intensity fields
@@ -199,17 +173,17 @@ class OusterLidarPublisher(Node):
                 # Create a header for the PointCloud2 message
                 header = Header()
                 header.frame_id = self.config_file['lidar']['frame_id']
-
                 # Set the timestamp based on the LiDAR's timestamp mode
-                # if self.timestamp_mode in [client.TimestampMode.TIME_FROM_PTP_1588, client.TimestampMode.TIME_FROM_SYNC_PULSE_IN]:
-                #     # Use the LiDAR's internal timestamp
-                #     lidar_time = scan.timestamp
-                #     # print(f"lidar_time: {lidar_time}")
-                #     header.stamp.sec = int(lidar_time // 1_000_000_000)
-                #     header.stamp.nanosec = int(lidar_time % 1_000_000_000)
-                # else:
-                # Use the current ROS time or system time if not using PTP or sync pulse
-                header.stamp = self.get_clock().now().to_msg()
+                if self.config_file['lidar']['timestamp_mode'] == "System_Time":
+                    # Use the current ROS time or system time if not using PTP or sync pulse
+                    header.stamp = self.get_clock().now().to_msg()
+             
+                else:    
+                    # Use the LiDAR's internal timestamp ->  if self.timestamp_mode in [client.TimestampMode.TIME_FROM_PTP_1588, client.TimestampMode.TIME_FROM_SYNC_PULSE_IN,client.TimestampMode.TIME_FROM_INTERNAL_OSC]:
+                    lidar_time = scan.timestamp
+                    header.stamp.sec = int(lidar_time // 1_000_000_000)
+                    header.stamp.nanosec = int(lidar_time % 1_000_000_000)
+
 
                 # Define the fields (x, y, z, intensity) for the PointCloud2 message
                 fields = [
@@ -224,20 +198,12 @@ class OusterLidarPublisher(Node):
 
                 # Publish the message
                 self.publisher.publish(pc2_msg)
-                self.get_logger().info(f"Published {len(points_list)} points with intensity. Timestamp: {header.stamp.sec}.{header.stamp.nanosec} {self.timestamp_mode}")
-                
-                # Only publish one scan per timer callback
-                # break
-
-# def parse_opt():
-#     parser = argparse.ArgumentParser()
-#     parser.add_argument('--config_path', type=str, default=ROOT / 'ouster_config.yaml', help='path to config file')
-#     return parser.parse_args()
+                # self.get_logger().info(f"Published {len(points_list)} points with intensity. Timestamp: {header.stamp.sec}.{header.stamp.nanosec} {self.config_file['lidar']['timestamp_mode']}")
 
 def main(args=None):
     rclpy.init(args=args)
     # opt = parse_opt()
-    ouster_lidar_publisher = OusterLidarPublisher()#OusterLidarPublisher(opt)
+    ouster_lidar_publisher = OusterLidarPublisher()
     try:
         rclpy.spin(ouster_lidar_publisher)
     except KeyboardInterrupt:

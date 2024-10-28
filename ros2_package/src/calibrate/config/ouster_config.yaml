@@ -1,7 +1,7 @@
 # ouster_config.yaml
 
 sensor:
-  host_name: 'os-122130000681.local'  # Replace with your Ouster LiDAR IP
+  host_name: 'os-122344000063.local' #'os-122130000681.local'  # Replace with your Ouster LiDAR IP os-122344000063.local/
   udp_port_lidar: 7502
   udp_port_imu: 7503
 
@@ -18,6 +18,7 @@ lidar:
 
 topic:
   name: '/lidar_points'
+  depth: 5
   queue_size: 5
 
 qos:

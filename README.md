@@ -91,6 +91,8 @@ ROS2 package to configure, test and start sensors : Camera and Lidar ( zed2 came
    ros2 bag play my_rosbag --clock 100
    ```
    The `--clock` option publishes on the `/clock` topic at 100 Hz.
+
+
  
 ### Important Notes
  
@@ -101,3 +103,12 @@ ROS2 package to configure, test and start sensors : Camera and Lidar ( zed2 came
 - If using launch files, set ` use_sim_time ` parameter for each node in the launch file.
 
 - Verify time settings with ` ros2 param get /your_node use_sim_time `.
+
+
+# Zed Camera
+- In this setup the Zed camera is used a monocular camera (left).
+- For this reason the rectification is set to identity:
+```
+self.camera_info.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+```
+- To update the camera intrinsic parameters use the  [zed](Sensor_Setup/ros2_package/src/calibrate/config/zed_intrinsic.yaml)
