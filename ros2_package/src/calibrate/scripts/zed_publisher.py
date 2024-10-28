@@ -11,26 +11,22 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSDurabilityPolicy, QoSHistoryPolicy
 from rclpy.qos import QoSLivelinessPolicy
+
 class ZEDCameraPublisher(Node):
     def __init__(self):
         super().__init__('zed_camera_publisher')
-        #       # Check if the parameter is already declared
-        # if not self.has_parameter('use_sim_time'):
-        #     self.declare_parameter('use_sim_time', True)
-        # else:
-        #     print(self.has_parameter('use_sim_time'))
-        #     self.get_logger().info(f"Already using use_sim_time ")
-        
 
         # Now we can safely get and use the parameter
         use_sim_time = self.get_parameter('use_sim_time').get_parameter_value().bool_value
         self.get_logger().info(f'use_sim_time is set to: {use_sim_time}')
-        # Load configuration
         
+        # Load configuration
         config_path = self.load_yaml_file()
-        print("config_path: ",config_path)
         with open(config_path, 'r') as config_file:
             self.config = yaml.safe_load(config_file)
+        
+        self.timestamp = self.config['']
+        self.get_camera_info()
 
         self.zed = sl.Camera()
         self.bridge = CvBridge()
@@ -48,33 +44,26 @@ class ZEDCameraPublisher(Node):
             self.get_logger().error(f"Error opening ZED: {status}")
             exit(1)
 
-        # sensor_qos = QoSProfile(
-        #     reliability=QoSReliabilityPolicy.BEST_EFFORT,
-        #     durability=QoSDurabilityPolicy.VOLATILE,
-        #     history=QoSHistoryPolicy.KEEP_LAST,
-        #     depth=2,
-        #     # liveliness=QoSLivelinessPolicy.AUTOMATIC,
-        #     # deadline=rclpy.duration.Duration(seconds=0.1),
-        #     # lifespan=rclpy.duration.Duration(seconds=0.5),
-        # )
-
-        # # QoS profile
-        # qos_profile = QoSProfile(
-        #     reliability=getattr(ReliabilityPolicy, self.config['qos']['reliability']),
-        #     history=getattr(HistoryPolicy, self.config['qos']['history']),
-        #     depth=self.config['qos']['depth']
-        # )
-        self.get_camera_info()
-        # Publisher for ROS2 image topic
-        self.publisher_ = self.create_publisher(
-            Image, 
-            self.config['topic']['name'], 
-           5 # qos_profile
+        # QoS profile
+        qos_profile = QoSProfile(
+            reliability=getattr(ReliabilityPolicy, self.config['qos']['reliability']),
+            history=getattr(HistoryPolicy, self.config['qos']['history']),
+            depth=self.config['qos']['depth']
         )
-        self.camera_info_publisher = self.create_publisher(CameraInfo, 'zed/camera_info', 5)
+        
+
+        # Publisher for ROS2 image topic
+        self.image_publisher = self.create_publisher(
+            Image, 
+            self.config['ROS']['topic_name'], 
+            qos_profile
+        )
+        self.camera_info_publisher = self.create_publisher(CameraInfo, self.config['ROS']['camera_info_topic'], 5)
         
         self.create_timer(1.0 /  self.config['camera']['fps'], self.publish_image)
+        
         # self.publish_image()
+    
     def load_yaml_file(self):
         # Get the directory of the package's shared files
         package_share_directory = get_package_share_directory('calibrate')
@@ -95,6 +84,7 @@ class ZEDCameraPublisher(Node):
             else:
                 frame_rgb = frame
 
+            
             image_timestamp =  self.get_clock().now().to_msg()#self.zed.get_timestamp(sl.TIME_REFERENCE.IMAGE)
 
             image_msg = self.bridge.cv2_to_imgmsg(frame_rgb, "bgr8")
@@ -107,7 +97,7 @@ class ZEDCameraPublisher(Node):
 
             image_msg.header = header
 
-            self.publisher_.publish(image_msg)
+            self.image_publisher.publish(image_msg)
             # Publish camera info
             self.camera_info.header.stamp = image_timestamp
             # self.camera_info.header.stamp.sec = int(image_timestamp.get_seconds())
