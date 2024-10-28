@@ -12,7 +12,7 @@ ROS2 package to configure, test and start sensors : Camera and Lidar ( zed2 came
 - clone the repository inside src folder
 
    ```
-   git clone https://github.com/AV-Lab/Sensor_Setup 
+   git clone https://github.com/AV-Lab/Sensor_Setup .
    ```
 - Build and source  
     ``` 
