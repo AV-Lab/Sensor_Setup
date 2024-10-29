@@ -198,9 +198,6 @@ class InteractiveCalibration(Node):
         cv2.waitKey(0)
         cv2.destroyAllWindows()
 
-    
-    def shutdown(self):
-        self.zed.close()
 
 def main(args=None):
     rclpy.init(args=args)
