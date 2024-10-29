@@ -2,12 +2,19 @@
 # Sensor Setup
 
 [![ROS2](https://img.shields.io/badge/ROS2-Humble-blue)](https://docs.ros.org/en/humble/)
+[![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04-orange)](https://releases.ubuntu.com/22.04/)
+[![ZED SDK](https://img.shields.io/badge/ZED_SDK-4.1+-red)](https://www.stereolabs.com/developers/release/)
+[![Ouster SDK](https://img.shields.io/badge/Ouster_SDK-0.11.1-lightred)](https://static.ouster.dev/sdk-docs/index.html)
 
 A ROS2 package for configuring, testing, and operating sensors, specifically:
 - ZED2 Camera (Monocular Mode)
 - Ouster OS-1 LiDAR
 
 ## 📋 Table of Contents
+- [System Requirements](#-system-requirements)
+  - [Basic Requirements](#basic-requirements)
+  - [ZED SDK Installation](#zed-sdk-installation)
+  - [Ouster SDK Installation](#ouster-sdk-installation)
 - [Quick Start](#-quick-start)
 - [Usage](#-usage)
   - [Launch Options](#launch-options)
@@ -20,6 +27,52 @@ A ROS2 package for configuring, testing, and operating sensors, specifically:
 - [Working with ROS2 Bags](#-working-with-ros2-bags)
   - [Recording](#recording)
   - [Playback](#playback)
+
+
+## 💻 System Requirements
+
+### Basic Requirements
+- **Operating System**: Ubuntu 22.04 LTS (Jammy Jellyfish)
+- **ROS2 Distribution**: Humble Hawksbill
+- **Python**: 3.10 or higher
+- **CUDA**: 12.1 or higher (for ZED SDK)
+
+### ZED SDK Installation
+1. Download ZED SDK for Ubuntu 22.04:
+```bash
+wget https://download.stereolabs.com/zedsdk/4.0/cu117/ubuntu22 -O zed_sdk.run
+```
+
+2. Make the installer executable:
+```bash
+chmod +x zed_sdk.run
+```
+
+3. Run the installer:
+```bash
+./zed_sdk.run
+```
+
+4. Install ZED ROS2 wrapper:
+```bash
+cd ~/ros2_sensor_ws/src
+git clone --recursive https://github.com/stereolabs/zed-ros2-wrapper.git
+cd ..
+colcon build --symlink-install
+source install/setup.bash
+```
+
+### Ouster SDK Installation
+- Install Ouster SDK:
+```bash
+pip3 install ouster-sdk
+```
+
+### Network Configuration for Ouster LiDAR
+1. after connecting the lidar to your IPC / computer via Eternet cable check if network is working.
+ follow this video for more information : [Connecting ouster tutorial](https://www.youtube.com/watch?v=nTm2HY2OEfs&ab_channel=Ouster)
+
+2. To verify connection and test visulization with ouster-cli, follow this video [Visualize Ouster](https://www.youtube.com/watch?v=m0ANVFunObU&ab_channel=Ouster)
 
 ## 🚀 Quick Start
 
@@ -150,3 +203,6 @@ ros2 bag play my_rosbag --clock 100
 - Configure time settings in launch files when possible
 - Verify settings: `ros2 param get /your_node use_sim_time`
 - Review config files before sensor startup
+
+
+
