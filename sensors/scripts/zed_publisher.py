@@ -63,7 +63,7 @@ class ZEDCameraPublisher(Node):
             self.config['ROS']['topic_name'], 
             qos_profile
         )
-        self.camera_info_publisher = self.create_publisher(CameraInfo, self.config['ROS']['camera_info_topic'], 5)
+        self.camera_info_publisher = self.create_publisher(CameraInfo, self.config['ROS']['camera_info_topic'], 2)
         
         self.create_timer(1.0 /  self.config['camera']['fps'], self.publish_image)
         

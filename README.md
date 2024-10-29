@@ -1,126 +1,152 @@
-# Sensor_Setup
-ROS2 package to configure, test and start sensors : Camera and Lidar ( zed2 camera and ouster lidar)
 
-# Quick start
-- Create a ROS2 workspace
-   ```
-   mkdir ~/ros2_sensor_ws
-   cd ~/ros2_sensor_ws
-   mkdir src
-   cd src 
-   ```  
-- clone the repository inside src folder
+# Sensor Setup
 
-   ```
-   git clone https://github.com/AV-Lab/Sensor_Setup .
-   ```
-- Build and source  
-    ``` 
-    cd ros2_sensor_ws  && colcon build
-    ```  
-    ```
-    source install/setup.bash 
-    ```
-- To start both sensors with one launch file use the following command:
-    ```
-    ros2 launch calibrate launch_all_sensors.py 
-    ```
-- To start ouster lidar:   
-    ```
-    ros2 run calibrate ouster_node --ros-args --remap use_sim_time:=false
-    ```
+[![ROS2](https://img.shields.io/badge/ROS2-Humble-blue)](https://docs.ros.org/en/humble/)
+
+A ROS2 package for configuring, testing, and operating sensors, specifically:
+- ZED2 Camera (Monocular Mode)
+- Ouster OS-1 LiDAR
+
+## 📋 Table of Contents
+- [Quick Start](#-quick-start)
+- [Usage](#-usage)
+  - [Launch Options](#launch-options)
+  - [Individual Sensor Operation](#individual-sensor-operation)
+  - [Data Recording](#data-recording)
+- [Sensor Details](#-sensor-details)
+  - [Frame Orientations](#frame-orientations)
+  - [ZED Camera Setup](#zed-camera-setup)
+  - [Ouster LiDAR Setup](#ouster-lidar-setup)
+- [Working with ROS2 Bags](#-working-with-ros2-bags)
+  - [Recording](#recording)
+  - [Playback](#playback)
+
+## 🚀 Quick Start
+
+1. Create a ROS2 workspace:
+```bash
+mkdir -p ~/ros2_sensor_ws/src
+cd ~/ros2_sensor_ws/src
+```
+
+2. Clone the repository:
+```bash
+git clone https://github.com/AV-Lab/Sensor_Setup .
+```
+
+3. Build and source:
+```bash
+cd ~/ros2_sensor_ws
+colcon build && source install/setup.bash
+```
+
+## 🎮 Usage
+
+### Launch Options
+
+Launch all sensors with a single command:
+```bash
+ros2 launch sensors launch_all_sensors.py
+```
+
+### Individual Sensor Operation
+
+Start Ouster LiDAR:
+```bash
+ros2 run sensors ouster_node --ros-args --remap use_sim_time:=false
+```
+
+Start ZED Camera:
+```bash
+ros2 run sensors zed_node --ros-args --remap use_sim_time:=false
+```
+
+### Data Recording
+
+Save synchronized samples from rosbag:
+```bash
+ros2 run sensors save_node 100 'images_x' 'pcds_x' 10 10 1 --ros-args -p use_sim_time:=true
+```
+
+Save synchronized samples in real-time:
+```bash
+ros2 run sensors save_node 100 'images_x' 'pcds_x' 10 10 1 --ros-args -p use_sim_time:=false
+```
+
+Parameters for save_node:
+```
+ros2 run sensors save_node --num_saves --image_folder --pcd_folder --set_size --set_delay --frame_delay --ros-args -p use_sim_time:=true
+```
+
+## 📊 Sensor Details
+
+### Frame Orientations
+
+#### Ouster LiDAR (Right-hand Rule)
+- X: Forward (depth)
+- Y: Left
+- Z: Up
+
+#### Camera Frame (CV2 Convention)
+- X: Right
+- Y: Down
+- Z: Forward (depth)
+
+### ZED Camera Setup
+
+The ZED camera operates in monocular mode using the left lens and publishes:
+1. **Camera Image**: Provides the raw image feed from the camera.
+2. **Camera Info**: Publishes intrinsic parameters of the camera as a `CameraInfo` type message.
 
 
-- To run zed camera:  
-    ```
-    ros2 run calibrate zed_node --ros-args --remap use_sim_time:=false  
-    ```
+#### Configuration
+- Configuration file: [sensors/config/zed_config.yaml](sensors/config/zed_config.yaml).
+- Default settings apply if distortion parameters are not set.
+- Rectification matrix is identity (monocular mode).
 
+### Ouster LiDAR Setup
 
-- To Save synchronized samples from rosbag  
-    ``` 
-    ros2 run calibrate save_node   100 'images_x' 'pcds_x' 10 10 1 --ros-args -p use_sim_time:=true
-    ```
- 
-- To Save synchronized samples from sensors (real-time)  
-    ```
-    ros2 run calibrate save_node   100 'images_x' 'pcds_x' 10 10 1 --ros-args -p use_sim_time:=false
-    ```
- 
+- Configured for OS-1 Ouster
+- Configuration file: [sensors/config/ouster_config.yaml](sensors/config/ouster_config.yaml).
+- Publishes PointCloud2 messages (x, y, z, intensity).
 
-    ros2 run calibrate save_node   --num_saves --image_folder pcd_folder --set_size  --set_delay --frame_delay --ros-args -p use_sim_time:=true 
+⚠️ **Important Notes**:
+- Update LiDAR IP/hostname in config file before use.
+- FPS is determined by LiDAR mode (e.g., 512x20 = 20 fps)
 
-
-# Notes
-## Frame Orientations
-- Based on the calibration:
-   - Ouster lidar [Right hand Rule]
-      -  X - forward (depth)
-      -  Y - left 
-      -  Z - Up
-   - Camera frame -> same as image CV2
-      -  X - right
-      -  Y - down
-      -  Z - forward (depth)
-
-## Steps for Consistent Timestamps in ROS2 Rosbags
- - If you plan to record a rosbag and to replay it with the same timestamp follow the following instructions:
+## 📦 Working with ROS2 Bags
 
 ### Recording
- 
+
 1. Set `use_sim_time` to false for all nodes:
-   ```bash
-   ros2 param set /your_node use_sim_time false
-   ```
-   (Repeat for each node, or set in launch files)
-    
-- add the following at the end of node launch to use system time:  
-   ``` 
-   ros2 run calibrate node_to_run  --ros-args -p use_sim_time:=False  
-   ```
- 
-2. Record the rosbag:
-   ```bash
-   ros2 bag record -a -o my_rosbag
-   ```
-   The `-a` flag records all topics.
- 
+```bash
+ros2 param set /your_node use_sim_time false
+# Or in launch file:
+ros2 run sensors node_to_run --ros-args -p use_sim_time:=false
+```
+
+2. Record all topics:
+```bash
+ros2 bag record -a -o my_rosbag
+```
+
 ### Playback
- 
-1. Set `use_sim_time` to true for all nodes that will receive played back data:
-   ```bash
-   ros2 param set /your_node use_sim_time true
-   ```
-   (Repeat for each node, or set in launch files)
-   
-   add the following at the end of node launch to use sim_time:  
-   ``` 
-   ros2 run calibrate save_node  --ros-args -p use_sim_time:=true  
-   ```
- 
-2. Play the rosbag with clock publishing:
-   ```bash
-   ros2 bag play my_rosbag --clock 100
-   ```
-   The `--clock` option publishes on the `/clock` topic at 100 Hz.
 
-
- 
-### Important Notes
- 
-- Ensure all nodes are using the same time source during recording and playback.
-
-- For nodes created after bag playback starts, set ` use_sim_time ` parameter in the node's constructor.
-
-- If using launch files, set ` use_sim_time ` parameter for each node in the launch file.
-
-- Verify time settings with ` ros2 param get /your_node use_sim_time `.
-
-
-# Zed Camera
-- In this setup the Zed camera is used a monocular camera (left).
-- For this reason the rectification is set to identity:
+1. Set `use_sim_time` to true for nodes receiving playback:
+```bash
+ros2 param set /your_node use_sim_time true
+# Or in launch file:
+ros2 run sensors save_node --ros-args -p use_sim_time:=true
 ```
-self.camera_info.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+
+2. Play rosbag with clock publishing:
+```bash
+ros2 bag play my_rosbag --clock 100
 ```
-- To update the camera intrinsic parameters use the  [zed](Sensor_Setup/ros2_package/src/calibrate/config/zed_intrinsic.yaml)
+
+#### Best Practices
+- Ensure consistent time source across all nodes
+- Set `use_sim_time` in node constructor for nodes created after playback
+- Configure time settings in launch files when possible
+- Verify settings: `ros2 param get /your_node use_sim_time`
+- Review config files before sensor startup
