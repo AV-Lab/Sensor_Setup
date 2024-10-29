@@ -1,7 +1,4 @@
 # zed_config.yaml
-
-# zed_config.yaml
-
 camera:
   id: 0  # Camera ID (change if necessary)
   fps: 20  # Frames per second
