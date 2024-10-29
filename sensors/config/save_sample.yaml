@@ -1,0 +1,7 @@
+# Save Sampels
+ROS:
+  image_topic_name: '/image_raw'
+  pointcloud_topic_name: '/lidar_points'
+
+Sync:
+  threshold: 0.05 # tolerace for synchronization in secs

@@ -11,38 +11,45 @@ from sensor_msgs_py import point_cloud2
 import open3d as o3d
 import time
 import sys
+import yaml
+from ament_index_python.packages import get_package_share_directory
 
 class SensorSyncSaverNode(Node):
-    def __init__(self, args):
+    def __init__(self):
         super().__init__('sensor_sync_saver_node')
 
         # Now we can safely get and use the parameter
         use_sim_time = self.get_parameter('use_sim_time').get_parameter_value().bool_value
         self.get_logger().info(f'use_sim_time is set to: {use_sim_time}')
+        # Load configuration
+        config_path = self.load_yaml_file()
+        with open(config_path, 'r') as config_file:
+            self.config_file = yaml.safe_load(config_file)  
         
         
-        self.num_saves = args.num_saves
-        self.image_folder = args.image_folder
-        self.pcd_folder = args.pcd_folder
-        self.delay_set = args.set_delay
-        self.delay_frames = args.frame_delay
-        self.set_size = args.set_size
+        self.num_saves = self.config_file['Sync']['threshold'] 
+        self.image_folder = self.config_file['Sync']['threshold'] 
+        self.pcd_folder = self.config_file['Sync']['pcd_folder'] 
+        self.delay_set = self.config_file['Sync']['set_delay']
+        self.delay_frames = self.config_file['Sync']['frame_delay']
+        self.set_size = self.config_file['Sync']['set_size']
         self.save_count = 0
         self.cv_bridge = CvBridge()
+        
         
         # Create output directories
         os.makedirs(self.image_folder, exist_ok=True)
         os.makedirs(self.pcd_folder, exist_ok=True)
         
         # Create subscribers for LiDAR and camera topics
-        lidar_sub = Subscriber(self, PointCloud2, '/ouster/lidar_points')
-        camera_sub = Subscriber(self, Image, '/zed_image_raw')
+        lidar_sub = Subscriber(self, PointCloud2, self.config_file['ROS']['image_topic_name'])
+        camera_sub = Subscriber(self, Image, self.config_file['ROS']['pointcloud_topic_name'])
         
         # Create approximate time synchronizer
         sync = ApproximateTimeSynchronizer(
             [lidar_sub, camera_sub],
             queue_size=10,
-            slop=0.05  # 50ms time difference tolerance
+            slop= self.config_file['Sync']['threshold']  
         )
         sync.registerCallback(self.sync_callback)
     
@@ -109,24 +116,31 @@ class SensorSyncSaverNode(Node):
         
         # Save as binary file
         points.tofile(filename)
+    
+    def load_yaml_file(self):
+        # Get the directory of the package's shared files
+        package_share_directory = get_package_share_directory('sensor')
+        
+        # Construct the path to 'zed_config.yaml' in the 'config' directory
+        config_file_path = os.path.join(package_share_directory, 'config', 'ouster_config.yaml')
 
 def main(args=None):
     rclpy.init(args=args)
     
 
-    # Set up argparse
-    parser = argparse.ArgumentParser(description='Save synchronized LiDAR and camera data')
-    parser.add_argument('num_saves', type=int,  default=50,help='Number of data pairs to save')
-    parser.add_argument('image_folder', type=str,default='./images', help='image folder name')
-    parser.add_argument('pcd_folder', type=str, default='./pcds',help='pcd folder name')
-    parser.add_argument('--set_size', type=int, default=10, help='Number of frames per set')
-    parser.add_argument('--set_delay', type=float, default=10.0, help='Delay between sets in seconds')
-    parser.add_argument('--frame_delay', type=float, default=1.0, help='Delay between frames in seconds')
+    # # Set up argparse
+    # parser = argparse.ArgumentParser(description='Save synchronized LiDAR and camera data')
+    # parser.add_argument('num_saves', type=int,  default=50,help='Number of data pairs to save')
+    # parser.add_argument('image_folder', type=str,default='./images', help='image folder name')
+    # parser.add_argument('pcd_folder', type=str, default='./pcds',help='pcd folder name')
+    # parser.add_argument('--set_size', type=int, default=10, help='Number of frames per set')
+    # parser.add_argument('--set_delay', type=float, default=10.0, help='Delay between sets in seconds')
+    # parser.add_argument('--frame_delay', type=float, default=1.0, help='Delay between frames in seconds')
     
-    # Parse known args
-    parsed_args, ros_args = parser.parse_known_args()
+    # # Parse known args
+    # parsed_args, ros_args = parser.parse_known_args()
 
-    node = SensorSyncSaverNode(parsed_args) #--ros-args --remap use_sim_time:=false
+    node = SensorSyncSaverNode() #parsed_args
     rclpy.spin(node)
     
     node.destroy_node()
