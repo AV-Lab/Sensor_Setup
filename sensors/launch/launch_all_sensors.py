@@ -6,7 +6,7 @@ def generate_launch_description():
     return LaunchDescription([
         # First node: start without delay
         Node(
-            package='calibrate',
+            package='sensors',
             executable='clock_node',  # Replace with your script name
             name='clock_node',
             output='screen'
@@ -16,7 +16,7 @@ def generate_launch_description():
             period=5.0,  # Delay in seconds
             actions=[
                 Node(
-                    package='calibrate',
+                    package='sensors',
                     executable='ouster_node',  # Replace with your script name
                     name='ouster_node',
                     output='screen'
@@ -28,7 +28,7 @@ def generate_launch_description():
             period=1.0,  # Delay in seconds
             actions=[
                 Node(
-                    package='calibrate',
+                    package='sensors',
                     executable='zed_node',  # Replace with your script name
                     name='zed_node',
                     output='screen'
