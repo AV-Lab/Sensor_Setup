@@ -4,8 +4,8 @@ ROS2 package to configure, test and start sensors : Camera and Lidar ( zed2 came
 # Quick start
 - Create a ROS2 workspace
    ```
-   mkdir ~/ros2_ws
-   cd ~/ros2_ws
+   mkdir ~/ros2_sensor_ws
+   cd ~/ros2_sensor_ws
    mkdir src
    cd src 
    ```  
@@ -16,7 +16,7 @@ ROS2 package to configure, test and start sensors : Camera and Lidar ( zed2 came
    ```
 - Build and source  
     ``` 
-    cd ros2_ws  && colcon build
+    cd ros2_sensor_ws  && colcon build
     ```  
     ```
     source install/setup.bash 
