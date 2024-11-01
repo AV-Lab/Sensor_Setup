@@ -6,7 +6,7 @@ package_name = 'sensors'
 
 setup(
     name=package_name,
-    version='0.0.0',
+    version='0.0.1',
     packages=find_packages(exclude=['test']),
     data_files=[
         ('share/ament_index/resource_index/packages',
@@ -32,6 +32,7 @@ setup(
             'clock_node = scripts.clock:main',  # 
             'ouster_node = scripts.ouster_publisher:main',  # Adjust if you have a main function
             'zed_node = scripts.zed_publisher:main',  # Adjust if you have a main function
+            'elp_node = scripts.elp_publisher:main',
             'save_node = scripts.save_samples:main',
         ],
     },

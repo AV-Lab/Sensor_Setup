@@ -1,0 +1,65 @@
+camera:
+  id: 1  # Camera ID (change if necessary)
+  fps: 30  # Frames per second
+  resolution: HD1080  # Options: VGA, HD720, HD1080, HD2K
+  height: 1080
+  width: 1920
+  timestamp_mode: "System_Time"  # Options: System_Time, Camera_Time
+
+ROS:
+  topic_name: '/elp/image_raw'  # Main image topic
+  queue_size: 10
+  frame_id: 'elp_camera_frame'  # Camera frame ID for tf
+  camera_info_topic: '/elp/camera_info'  # Camera calibration info topic
+
+qos:
+  reliability: BEST_EFFORT  # Options: RELIABLE, BEST_EFFORT
+  history: KEEP_LAST  # Options: KEEP_LAST, KEEP_ALL
+  depth: 1  # How many messages to keep in history
+
+intrinsics:
+  # Distortion coefficients [k1, k2, p1, p2, k3]
+  distortion: [0.0, 0.0, 0.0, 0.0, 0.0]  
+  
+  # Camera matrix (3x3 matrix in row-major format)
+  # [fx,  0, cx]
+  # [ 0, fy, cy]
+  # [ 0,  0,  1]
+  camera_matrix_K: [
+    1108.145514, 0.0, 980.526233,
+    0.0, 1109.205787, 546.265441,
+    0.0, 0.0, 1.0
+  ]
+  
+  # Rectification matrix (3x3 matrix, usually identity for monocular cameras)
+  rectification: [
+    1.0, 0.0, 0.0,
+    0.0, 1.0, 0.0,
+    0.0, 0.0, 1.0
+  ]
+  
+  # Projection matrix (3x4 matrix)
+  projection: [
+    1153.806674, 0.0, 942.859434, 0.0,
+    0.0, 1156.223082, 536.992462, 0.0,
+    0.0, 0.0, 1.0, 0.0
+  ]
+
+# Camera calibration settings
+calibration:
+  enable_auto_exposure: true
+  enable_auto_white_balance: true
+  gain: 100  # Camera gain (0-100)
+  exposure: 100  # Camera exposure (0-100)
+  brightness: 50  # Camera brightness (0-100)
+  contrast: 50  # Camera contrast (0-100)
+  saturation: 50  # Camera saturation (0-100)
+  sharpness: 50  # Camera sharpness (0-100)
+
+# Advanced settings
+advanced:
+  buffer_size: 1  # Frame buffer size
+  enable_timestamp_sync: true  # Enable timestamp synchronization
+  max_retry_count: 3  # Maximum number of retries on camera failure
+  warmup_frames: 30  # Number of frames to drop during camera warmup
+  enable_logging: true  # Enable detailed logging
