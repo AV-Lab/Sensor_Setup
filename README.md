@@ -24,9 +24,13 @@ A ROS2 package for configuring, testing, and operating sensors:
   - [ZED Camera Setup](#zed-camera-setup)
   - [Ouster LiDAR Setup](#ouster-lidar-setup)
 - [Sensor Calibration](#sensor-calibration)
-  - [Data Collection](#data-collection-tips)
-  - [Camera Intrinsic Calibration](#Camera-Intrinsic-Calibration)
-  - [Camera-to-LiDAR Calibration](#Camera-to-LiDAR-Calibration)
+  - [Data Collection Tips](#data-collection-tips)
+  - [Camera Intrinsic Calibration](#camera-intrinsic-calibration)
+    - [ROS2 Based Calibration](#ros2-based-calibration)
+    - [MATLAB Based Calibration](#matlab-based-calibration)
+  - [Camera-to-LiDAR Calibration](#camera-to-lidar-calibration)
+    - [Calibration with MATLAB](#matlab-calibration)
+    - [Interactive Refinement](#interactive-calibration-refinement)
 
 - [Working with ROS2 Bags](#-working-with-ros2-bags)
   - [Recording](#recording)
@@ -88,7 +92,7 @@ colcon build && source install/setup.bash
 
 ### Launch Options
 
-Start all sensors with a single command:
+Start all sensors with a single command (ouster and ZED):
 ```bash
 ros2 launch sensors launch_all_sensors.py
 ```
@@ -99,9 +103,14 @@ Run LiDAR or camera independently:
 ```bash
 # Start Ouster LiDAR
 ros2 run sensors ouster_node --ros-args --remap use_sim_time:=false
-
+```
+```bash
 # Start ZED Camera
 ros2 run sensors zed_node --ros-args --remap use_sim_time:=false
+```
+```bash
+# Start ELP Camera
+ros2 run sensors elp_node --ros-args --remap use_sim_time:=false
 ```
 
 ### Data Recording
@@ -171,45 +180,60 @@ The ZED camera operates in monocular mode using the left lens and publishes:
 - FPS is tied to LiDAR mode (e.g., 512x20 = 20 fps)
 - Check sensor status in ouster-cli before launching ROS2 nodes
 
-# Sensor Calibration
+# 📊 Sensor Calibration
 
 This implementation focuses on two key calibration procedures:
-Camera intrinsic calibration
-Camera-to-LiDAR extrinsic calibration
+- 📸 Camera intrinsic calibration
+- 🔄 Camera-to-LiDAR extrinsic calibration
 
-## Data Collection Tips
-- Use a large checkerboard (at least 30x30cm) for better detection by both sensors
-  - Generate calibration pattern: [calib.io Pattern Generator](https://calib.io/pages/camera-calibration-pattern-generator)
-  - Print and mount on rigid, flat surface
-- Ensure good lighting conditions but avoid direct sunlight
-- Clear the calibration area of objects with similar patterns to checkerboard
-- Keep checkerboard flat and stable during capture
-- Capture frames with checkerboard at different:
-  - Distances (1-5 meters recommended)
-  - Angles relative to sensors
-  - Positions in the field of view
-- Minimum 10-15 good frame pairs recommended
+## 🎯 Data Collection Tips
 
-## Camera Intrinsic Calibration
+### Essential Setup
+- Use a large checkerboard (at least 30x30cm) for reliable detection
+  - 🔗 Generate pattern: [calib.io Pattern Generator](https://calib.io/pages/camera-calibration-pattern-generator)
+  - 📏 Mount on rigid, flat surface (foam board works well)
+  - ⚠️ Verify printout dimensions are exact
+  
+### Environment
+- ☀️ Good lighting but avoid direct sunlight (causes glare)
+- 🧹 Clear area of objects with checkerboard-like patterns
+- 🌡️ Allow sensors to warm up (15-20 minutes) for stability
+
+### Collection Strategy
+- 📸 Capture checkerboard at various:
+  - Distances: 1-5 meters (start close, then move back)
+  - Angles: 15-45 degrees from sensor axis
+  - Positions: cover entire sensor field of view
+- 🎯 Aim for 15-20 diverse, high-quality frame pairs
+- 🖐️ Hold pattern still during capture (motion blur affects accuracy)
+
+### Pro Tips
+- Check image exposure - avoid over/underexposed areas
+- Mark floor positions for repeatable captures
+- Test detection in MATLAB with a few samples before full collection
+- Back up raw data before processing
+
+## 🎥 Camera Intrinsic Calibration
 
 ### Purpose
-Camera intrinsic calibration determines the internal parameters of the camera that affect how 3D points are projected onto the 2D image plane.
+Camera intrinsic calibration determines the internal parameters affecting 3D-to-2D projection.
 
 ### Parameters Calibrated
-- Focal length (fx, fy)
-- Principal point (cx, cy)
-- Distortion coefficients
-  - Radial distortion (k1, k2)
-  - Tangential distortion (p1, p2)
+- 📏 Focal length (fx, fy)
+- 🎯 Principal point (cx, cy)
+- 🔧 Distortion coefficients
+  - Radial (k1, k2)
+  - Tangential (p1, p2)
 
 ### Method
-Capture multiple images of a checkerboard pattern
-Detect corners in the images
-Solve for intrinsic parameters using Zhang's method
+1. Capture checkerboard images
+2. Detect corners
+3. Apply Zhang's method
 
-After calibration, update in config files ([Zed_camera](/sensors/config/zed_config.yaml), [Elp_camera](/sensors/config/elp_config.yaml)):
+### Config Update
+After calibration, update config files ([Zed_camera](/sensors/config/zed_config.yaml), [Elp_camera](/sensors/config/elp_config.yaml)):
 ```yaml
-# camera_matrix_K maps 3D points in camera coordinate frame to 2D image points
+# Maps 3D camera coordinates → 2D image points
 distortion: [k1, k2, p1, p2, k3]
 camera_matrix_K: [fx, 0, cx, 0, fy, cy, 0, 0, 1] 
 rectification: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
@@ -217,11 +241,12 @@ rectification: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
 
 ### Calibration Options
 
-#### ROS2 Based Calibration
+#### 🤖 ROS2 Based Calibration
 ```bash
 # Install ROS calibration package
 sudo apt-get install ros-<ros2-distro>-camera-calibration
 ```
+
 ```bash
 # Run calibration node for monocular camera
 ros2 run camera_calibration cameracalibrator --size 8x6 --square 0.108 image:=/camera/image_raw camera:=/camera/camera_info
@@ -232,72 +257,108 @@ ros2 run camera_calibration cameracalibrator --size 8x6 --square 0.108 image:=/c
 # /camera/image_raw: Raw image topic
 # /camera/camera_info: Camera info topic 
 ```
+
 Follow calibration steps:
 - Move checkerboard to fill calibration bars
 - Click CALIBRATE when ready
 - Click SAVE after successful calibration
 - Find results in ~/.ros/camera_info/
 
-#### MATLAB Based Calibration
+#### 📐 MATLAB Based Calibration
 MATLAB can perform both intrinsic and extrinsic calibration together:
 
-1. Start MATLAB and run Calibrator:
+1. Launch Calibrator:
 ```matlab
-% Option 1: Use command line
-cameraCalibrator  % For intrinsic only
-lidarCameraCalibrator  % For both intrinsic and extrinsic
-
-% Option 2: Use Apps tab in MATLAB
-% Click 'Lidar Camera Calibrator' under Apps
+% Choose method:
+cameraCalibrator        % Intrinsic only
+lidarCameraCalibrator   % Both calibrations
 ```
 
-2. Troubleshooting checkerboard detection:
+2. Troubleshooting Detection:
 ```matlab
-% If automatic plane detection fails:
-% a) Manual plane selection:
-% - Click 'Select Region' in the toolbar
-% - Draw region around checkerboard in pointcloud
+% If plane detection fails:
+% Method A: Manual Selection
+% - Use 'Select Region' tool
+% - Draw around checkerboard
 
-% b) Adjust detection parameters:
-% - Click 'Settings' in the toolbar
+% Method B: Adjust Parameters
+% - Open 'Settings'
 % - Modify 'Plane Detection Threshold'
-% - Try values between 0.01 and 0.1
+% - Try values between 0.01 to 0.1
 ```
-## Camera-to-LiDAR Calibration
+
+## 🔄 Camera-to-LiDAR Calibration
 
 ### Purpose
-Determines the geometric transformation between the camera and LiDAR sensor, enabling fusion of 2D images with 3D point clouds.
+Determines geometric transformation between sensors for point cloud projection.
 
 ### Parameters Calibrated
-- Rotation matrix (R)
-- Translation vector (t)
-- Together they form the transformation from LiDAR to camera coordinate system
+- 🔄 Rotation matrix (R)
+- 📏 Translation vector (t)
 
 ### Calibration Workflow
-- Collect synchronized data:
-  - Use save_node for synchronized frame capture (see [Data Recording](#data-recording))
-  - Configure sampling parameters in [save_sample.yaml](/sensors/config/save_sample.yaml)
 
-- Perform calibration using MATLAB:
-  - Use collected synchronized frames
-  - MATLAB Lidar Camera Calibrator App can compute both intrinsic and extrinsic parameters together
+#### 1. Data Collection
+```bash
+# Configure in save_sample.yaml first!
+ros2 run sensors save_node --ros-args -p use_sim_time:=false
+```
 
-- Update projection matrix in config:
+#### 2. MATLAB Calibration
+- Load synchronized pairs
+- Start with a small, high-quality dataset
+- Add more pairs only if needed
+
+#### 3. Config Update
 ```yaml
 projection: [P11, P12, P13, P14, P21, P22, P23, P24, P31, P32, P33, P34]
 ```
 
-### Refinement
-Fine-tune calibration results using:
+### Interactive Calibration Refinement
+Fine-tune the calibration results using:
 ```bash
 ros2 run sensors interactive_node
 ```
 
-## Verification
-- Visualize projected pointcloud on image
-- Check alignment at different distances
-- Verify with new data not used in calibration
-- Use interactive_node for manual adjustments
+#### Features & Controls
+```
+Translation Controls:
+r - Move right     l - Move left
+u - Move up        d - Move down
+
+Rotation Controls:
+rl - Rotate left (Z-axis)    rr - Rotate right (Z-axis)
+ru - Rotate up (Y-axis)      rd - Rotate down (X-axis)
+
+Commands:
+s - Save current transformation
+n - Next image pair
+```
+
+#### Usage Tips
+- Start with small adjustment values:
+  - Translation: try 0.01
+  - Rotation: try 0.001
+- Check alignment at different depths
+- Verify with multiple image pairs
+- Save progress frequently
+
+#### Operation Flow
+1. Loads initial transform from calibrate.yaml
+2. Processes each image-pointcloud pair:
+   - Shows point cloud projection overlay
+   - Allows interactive adjustments
+   - Saves transformations with timestamps
+3. Generates calibration history in YAML format
+
+### ✨ Validation Tips
+- 🎯 Check alignment at corners and edges
+- 📏 Verify at multiple distances
+- 🔄 Test with dynamic scenes
+- ⚡ Watch for temporal synchronization issues
+- 🔍 Look for consistent offsets (may indicate systematic error)
+
+
 ## 📦 Working with ROS2 Bags
 
 ### Recording
