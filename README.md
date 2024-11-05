@@ -269,7 +269,7 @@ cameraCalibrator
 
 % Or use Apps tab -> Camera Calibrator
 ```
-For detailed MATLAB calibration workflow (including both intrinsic and extrinsic calibration), see [MATLAB Based Calibration](#matlab-based-calibration) in Camera-to-LiDAR section.
+For detailed MATLAB calibration workflow (including both intrinsic and extrinsic calibration), see [MATLAB Based Calibration](#2-matlab-based-calibration) in Camera-to-LiDAR section.
 
 ## 🔄 Camera-to-LiDAR Calibration
 
