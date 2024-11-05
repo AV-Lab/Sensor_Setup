@@ -193,18 +193,19 @@ This implementation focuses on two key calibration procedures:
   - 🔗 Generate pattern: [calib.io Pattern Generator](https://calib.io/pages/camera-calibration-pattern-generator)
   - 📏 Mount on rigid, flat surface (foam board works well)
   - ⚠️ Verify printout dimensions are exact
+  - Black squares should be truly black (matte finish preferred)
   
 ### Environment
 - ☀️ Good lighting but avoid direct sunlight (causes glare)
 - 🧹 Clear area of objects with checkerboard-like patterns
-- 🌡️ Allow sensors to warm up (15-20 minutes) for stability
+- Ensure even lighting but avoid reflective surfaces
 
 ### Collection Strategy
 - 📸 Capture checkerboard at various:
   - Distances: 1-5 meters (start close, then move back)
   - Angles: 15-45 degrees from sensor axis
   - Positions: cover entire sensor field of view
-- 🎯 Aim for 15-20 diverse, high-quality frame pairs
+- 🎯 Aim for 15-50 diverse, high-quality frame pairs
 - 🖐️ Hold pattern still during capture (motion blur affects accuracy)
 
 ### Pro Tips
@@ -230,8 +231,7 @@ Camera intrinsic calibration determines the internal parameters affecting 3D-to-
 2. Detect corners
 3. Apply Zhang's method
 
-### Config Update
-After calibration, update config files ([Zed_camera](/sensors/config/zed_config.yaml), [Elp_camera](/sensors/config/elp_config.yaml)):
+After calibration, update in config files ([Zed_camera](/sensors/config/zed_config.yaml), [Elp_camera](/sensors/config/elp_config.yaml)):
 ```yaml
 # Maps 3D camera coordinates → 2D image points
 distortion: [k1, k2, p1, p2, k3]
@@ -245,9 +245,7 @@ rectification: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
 ```bash
 # Install ROS calibration package
 sudo apt-get install ros-<ros2-distro>-camera-calibration
-```
 
-```bash
 # Run calibration node for monocular camera
 ros2 run camera_calibration cameracalibrator --size 8x6 --square 0.108 image:=/camera/image_raw camera:=/camera/camera_info
 
@@ -265,27 +263,13 @@ Follow calibration steps:
 - Find results in ~/.ros/camera_info/
 
 #### 📐 MATLAB Based Calibration
-MATLAB can perform both intrinsic and extrinsic calibration together:
-
-1. Launch Calibrator:
 ```matlab
-% Choose method:
-cameraCalibrator        % Intrinsic only
-lidarCameraCalibrator   % Both calibrations
-```
+% Launch Camera Calibrator App
+cameraCalibrator
 
-2. Troubleshooting Detection:
-```matlab
-% If plane detection fails:
-% Method A: Manual Selection
-% - Use 'Select Region' tool
-% - Draw around checkerboard
-
-% Method B: Adjust Parameters
-% - Open 'Settings'
-% - Modify 'Plane Detection Threshold'
-% - Try values between 0.01 to 0.1
+% Or use Apps tab -> Camera Calibrator
 ```
+For detailed MATLAB calibration workflow (including both intrinsic and extrinsic calibration), see [MATLAB Based Calibration](#matlab-based-calibration) in Camera-to-LiDAR section.
 
 ## 🔄 Camera-to-LiDAR Calibration
 
@@ -304,10 +288,41 @@ Determines geometric transformation between sensors for point cloud projection.
 ros2 run sensors save_node --ros-args -p use_sim_time:=false
 ```
 
-#### 2. MATLAB Calibration
-- Load synchronized pairs
-- Start with a small, high-quality dataset
-- Add more pairs only if needed
+#### 2. MATLAB Based Calibration
+MATLAB can perform both intrinsic and extrinsic calibration together:
+
+1. Launch Calibrator:
+```matlab
+% Option 1: Command line
+lidarCameraCalibrator   % For both calibrations
+
+% Option 2: Apps tab in MATLAB
+% Click 'Lidar Camera Calibrator'
+```
+
+2. Load and Process Data:
+   - Select synchronized image-pointcloud pairs
+   - Specify checkerboard dimensions
+   - Enter square size in meters
+
+3. Troubleshooting Detection:
+```matlab
+% If plane detection fails:
+% Manual plane selection:
+- Click 'Select Region' button
+- Draw polygon around checkerboard in pointcloud view
+- Adjust selection until plane is well-defined
+
+% Adjust detection parameters:
+- Open 'Settings'
+- Modify 'Plane Detection Threshold' (try range 0.01-0.1)
+- Adjust 'Refinement Parameters' if needed
+```
+
+4. Export Results:
+   - Click 'Export Parameters'
+   - Choose YAML format
+   - Save for ROS2 usage
 
 #### 3. Config Update
 ```yaml
@@ -315,12 +330,28 @@ projection: [P11, P12, P13, P14, P21, P22, P23, P24, P31, P32, P33, P34]
 ```
 
 ### Interactive Calibration Refinement
-Fine-tune the calibration results using:
+
+#### Initial Setup
+Before using interactive_node, update initial parameters in calibrate.yaml:
+```yaml
+# sensors/config/calibrate.yaml
+transform:
+  # Update with initial intrinsic parameters (from ROS2 or MATLAB calibration)
+  intrinsic_k: [fx, 0, cx, 0, fy, cy, 0, 0, 1]
+  
+  # Update with initial extrinsic parameters (from MATLAB calibration)
+  lidar_camera: [R11, R12, R13, t1,
+                 R21, R22, R23, t2,
+                 R31, R32, R33, t3,
+                 0, 0, 0, 1]
+```
+
+#### Usage
 ```bash
 ros2 run sensors interactive_node
 ```
 
-#### Features & Controls
+#### Controls
 ```
 Translation Controls:
 r - Move right     l - Move left
@@ -335,7 +366,7 @@ s - Save current transformation
 n - Next image pair
 ```
 
-#### Usage Tips
+#### Refinement Tips
 - Start with small adjustment values:
   - Translation: try 0.01
   - Rotation: try 0.001
@@ -343,22 +374,14 @@ n - Next image pair
 - Verify with multiple image pairs
 - Save progress frequently
 
-#### Operation Flow
-1. Loads initial transform from calibrate.yaml
-2. Processes each image-pointcloud pair:
-   - Shows point cloud projection overlay
-   - Allows interactive adjustments
-   - Saves transformations with timestamps
-3. Generates calibration history in YAML format
-
-### ✨ Validation Tips
+### Validation
 - 🎯 Check alignment at corners and edges
 - 📏 Verify at multiple distances
 - 🔄 Test with dynamic scenes
 - ⚡ Watch for temporal synchronization issues
-- 🔍 Look for consistent offsets (may indicate systematic error)
+- 🔍 Look for consistent offsets
 
-
+Would you like me to adjust anything in this updated version?
 ## 📦 Working with ROS2 Bags
 
 ### Recording
@@ -402,3 +425,4 @@ ros2 bag play my_rosbag --clock 100
 
 ---
 For issues or feature requests, please [open an issue](https://github.com/AV-Lab/Sensor_Setup/issues) on our GitHub repository.
+
