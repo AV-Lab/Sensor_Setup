@@ -23,9 +23,15 @@ A ROS2 package for configuring, testing, and operating sensors:
   - [Frame Orientations](#frame-orientations)
   - [ZED Camera Setup](#zed-camera-setup)
   - [Ouster LiDAR Setup](#ouster-lidar-setup)
+- [Sensor Calibration](#sensor-calibration)
+  - [Data Collection](#data-collection-tips)
+  - [Camera Intrinsic Calibration](#Camera-Intrinsic-Calibration)
+  - [Camera-to-LiDAR Calibration](#Camera-to-LiDAR-Calibration)
+
 - [Working with ROS2 Bags](#-working-with-ros2-bags)
   - [Recording](#recording)
   - [Playback](#playback)
+
 
 ## 💻 System Requirements
 
@@ -165,6 +171,133 @@ The ZED camera operates in monocular mode using the left lens and publishes:
 - FPS is tied to LiDAR mode (e.g., 512x20 = 20 fps)
 - Check sensor status in ouster-cli before launching ROS2 nodes
 
+# Sensor Calibration
+
+This implementation focuses on two key calibration procedures:
+Camera intrinsic calibration
+Camera-to-LiDAR extrinsic calibration
+
+## Data Collection Tips
+- Use a large checkerboard (at least 30x30cm) for better detection by both sensors
+  - Generate calibration pattern: [calib.io Pattern Generator](https://calib.io/pages/camera-calibration-pattern-generator)
+  - Print and mount on rigid, flat surface
+- Ensure good lighting conditions but avoid direct sunlight
+- Clear the calibration area of objects with similar patterns to checkerboard
+- Keep checkerboard flat and stable during capture
+- Capture frames with checkerboard at different:
+  - Distances (1-5 meters recommended)
+  - Angles relative to sensors
+  - Positions in the field of view
+- Minimum 10-15 good frame pairs recommended
+
+## Camera Intrinsic Calibration
+
+### Purpose
+Camera intrinsic calibration determines the internal parameters of the camera that affect how 3D points are projected onto the 2D image plane.
+
+### Parameters Calibrated
+- Focal length (fx, fy)
+- Principal point (cx, cy)
+- Distortion coefficients
+  - Radial distortion (k1, k2)
+  - Tangential distortion (p1, p2)
+
+### Method
+Capture multiple images of a checkerboard pattern
+Detect corners in the images
+Solve for intrinsic parameters using Zhang's method
+
+After calibration, update in config files ([Zed_camera](/sensors/config/zed_config.yaml), [Elp_camera](/sensors/config/elp_config.yaml)):
+```yaml
+# camera_matrix_K maps 3D points in camera coordinate frame to 2D image points
+distortion: [k1, k2, p1, p2, k3]
+camera_matrix_K: [fx, 0, cx, 0, fy, cy, 0, 0, 1] 
+rectification: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+```
+
+### Calibration Options
+
+#### ROS2 Based Calibration
+```bash
+# Install ROS calibration package
+sudo apt-get install ros-<ros2-distro>-camera-calibration
+```
+```bash
+# Run calibration node for monocular camera
+ros2 run camera_calibration cameracalibrator --size 8x6 --square 0.108 image:=/camera/image_raw camera:=/camera/camera_info
+
+# Parameters:
+# --size: Number of inner corners (width x height)
+# --square: Size of each square in meters
+# /camera/image_raw: Raw image topic
+# /camera/camera_info: Camera info topic 
+```
+Follow calibration steps:
+- Move checkerboard to fill calibration bars
+- Click CALIBRATE when ready
+- Click SAVE after successful calibration
+- Find results in ~/.ros/camera_info/
+
+#### MATLAB Based Calibration
+MATLAB can perform both intrinsic and extrinsic calibration together:
+
+1. Start MATLAB and run Calibrator:
+```matlab
+% Option 1: Use command line
+cameraCalibrator  % For intrinsic only
+lidarCameraCalibrator  % For both intrinsic and extrinsic
+
+% Option 2: Use Apps tab in MATLAB
+% Click 'Lidar Camera Calibrator' under Apps
+```
+
+2. Troubleshooting checkerboard detection:
+```matlab
+% If automatic plane detection fails:
+% a) Manual plane selection:
+% - Click 'Select Region' in the toolbar
+% - Draw region around checkerboard in pointcloud
+
+% b) Adjust detection parameters:
+% - Click 'Settings' in the toolbar
+% - Modify 'Plane Detection Threshold'
+% - Try values between 0.01 and 0.1
+```
+## Camera-to-LiDAR Calibration
+
+### Purpose
+Determines the geometric transformation between the camera and LiDAR sensor, enabling fusion of 2D images with 3D point clouds.
+
+### Parameters Calibrated
+- Rotation matrix (R)
+- Translation vector (t)
+- Together they form the transformation from LiDAR to camera coordinate system
+
+### Calibration Workflow
+- Collect synchronized data:
+  - Use save_node for synchronized frame capture (see [Data Recording](#data-recording))
+  - Configure sampling parameters in [save_sample.yaml](/sensors/config/save_sample.yaml)
+
+- Perform calibration using MATLAB:
+  - Use collected synchronized frames
+  - MATLAB Lidar Camera Calibrator App can compute both intrinsic and extrinsic parameters together
+
+- Update projection matrix in config:
+```yaml
+projection: [P11, P12, P13, P14, P21, P22, P23, P24, P31, P32, P33, P34]
+```
+
+### Refinement
+Fine-tune calibration results using:
+```bash
+ros2 run sensors interactive_node
+```
+
+## Verification
+- Visualize projected pointcloud on image
+- Check alignment at different distances
+- Verify with new data not used in calibration
+- Use interactive_node for manual adjustments
 ## 📦 Working with ROS2 Bags
 
 ### Recording
@@ -203,6 +336,8 @@ ros2 bag play my_rosbag --clock 100
 - ✅ Configure timing in launch files when possible
 - ✅ Verify settings: `ros2 param get /your_node use_sim_time`
 - ✅ Review all config files before starting sensors
+
+
 
 ---
 For issues or feature requests, please [open an issue](https://github.com/AV-Lab/Sensor_Setup/issues) on our GitHub repository.
