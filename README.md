@@ -29,7 +29,7 @@ A ROS2 package for configuring, testing, and operating sensors:
     - [ROS2 Based Calibration](#ros2-based-calibration)
     - [MATLAB Based Calibration](#matlab-based-calibration)
   - [Camera-to-LiDAR Calibration](#camera-to-lidar-calibration)
-    - [Calibration with MATLAB](#matlab-calibration)
+    - [Calibration with MATLAB](#2-matlab-based-calibration)
     - [Interactive Refinement](#interactive-calibration-refinement)
 
 - [Working with ROS2 Bags](#-working-with-ros2-bags)
