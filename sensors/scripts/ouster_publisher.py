@@ -80,7 +80,7 @@ class OusterLidarPublisher(Node):
         self.source = client.Sensor(self.hostname, self.config.udp_port_lidar, self.config.udp_port_imu)
         self.publisher = self.create_publisher(
             PointCloud2, 
-            self.config_file['topic']['name'], 
+            self.config_file['ROS']['topic_name'], 
             qos_profile # self.config_file['topic']['depth']
         )
         # self.create_timer(1.0 / self.fps, self.publish_pointcloud)
@@ -146,7 +146,7 @@ class OusterLidarPublisher(Node):
             return None
     def load_yaml_file(self):
         # Get the directory of the package's shared files
-        package_share_directory = get_package_share_directory('sensor')
+        package_share_directory = get_package_share_directory('sensors')
         
         # Construct the path to 'zed_config.yaml' in the 'config' directory
         config_file_path = os.path.join(package_share_directory, 'config', 'ouster_config.yaml')
