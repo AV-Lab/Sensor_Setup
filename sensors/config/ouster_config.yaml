@@ -8,7 +8,7 @@ sensor:
 lidar:
   # fps: 20.0 taken from mode
   frame_id: 'os_sensor'
-  azimuth_window: [90000, 270000]  # [start_angle, end_angle] in millidegrees  # [start_angle, end_angle] in millidegrees
+  azimuth_window: [0, 360000] #90000 ,270000# [start_angle, end_angle] in millidegrees  # [start_angle, end_angle] in millidegrees
   phase_lock_enable: false # Allows sensor to consistently pass through a specific angle at a specific time on each rotation, False if TIME_FROM_INTERNAL_OSC ,
   phase_lock_offset: 180000  # 180 degrees (front) in millidegrees
   mode:  "1024x20"  #"512x20"      # Available modes:   # - "512x10" # - "512x20" # - "1024x10" -> Default  # - "1024x20" # - "2048x10"     

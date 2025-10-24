@@ -426,3 +426,4 @@ ros2 bag play my_rosbag --clock 100
 ---
 For issues or feature requests, please [open an issue](https://github.com/AV-Lab/Sensor_Setup/issues) on our GitHub repository.
 
+```v4l2-ctl --list-devices```

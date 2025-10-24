@@ -1,5 +1,5 @@
 camera:
-  id: 1  # Camera ID (change if necessary)
+  id: 0  # Camera ID (change if necessary)
   fps: 30  # Frames per second
   resolution: HD1080  # Options: VGA, HD720, HD1080, HD2K
   height: 1080
