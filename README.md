@@ -3,7 +3,7 @@
 [![ROS2](https://img.shields.io/badge/ROS2-Humble-blue)](https://docs.ros.org/en/humble/)
 [![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04-orange)](https://releases.ubuntu.com/22.04/)
 [![ZED SDK](https://img.shields.io/badge/ZED_SDK-4.1+-red)](https://www.stereolabs.com/developers/release/)
-[![Ouster SDK](https://img.shields.io/badge/Ouster_SDK-0.11.1-lightred)](https://static.ouster.dev/sdk-docs/index.html)
+[![Ouster SDK](https://img.shields.io/badge/Ouster_SDK-0.15.1-lightred)](https://static.ouster.dev/sdk-docs/index.html)
 
 A ROS2 package for configuring, testing, and operating sensors:
 - 📸 ZED2 Camera (Monocular Mode)
