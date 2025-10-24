@@ -32,7 +32,7 @@ setup(
             'clock_node = scripts.clock:main',  # 
             'ouster_node = scripts.ouster_publisher:main',  # Adjust if you have a main function
             'zed_node = scripts.zed_publisher:main',  # Adjust if you have a main function
-            'elp_node = scripts.elp_publisher:main',
+            'camera_node = scripts.camera_publisher:main',
             'save_node = scripts.save_samples:main',
         ],
     },

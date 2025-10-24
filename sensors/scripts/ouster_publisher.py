@@ -157,60 +157,7 @@ class OusterLidarPublisher(Node):
         config_file_path = os.path.join(package_share_directory, 'config', 'ouster_config.yaml')
         
         return config_file_path
-    
-    # def publish_pointcloud(self):
-    #     # with closing(core.Scans(self.source)) as scans:
-    #     # with closing(sensor.SensorScanSource(self.hostname, lidar_port=self.config.udp_port_lidar)) as scans:
-    #     with client._Sensor(self.hostname, self.config.udp_port_lidar) as source:
-    #         self.get_logger().info(f"Scan opened: {self.timestamp_mode}")
-    #         xyzlut = core.XYZLut(self.metadata)
-       
-    #         for scan in source:
-    #             # Read XYZ and intensity fields from the scan
-    #             # xyz = core.XYZLut(self.metadata)(scan)  # XYZ points
-    #             xyz = xyzlut(scan)
-                
-                
-                # intensity = scan.field(core.ChanField.REFLECTIVITY)  # Intensity field
 
-                # # Reshape XYZ and intensity fields
-                # xyz_points = xyz.reshape(-1, 3)  # Reshape to (N, 3) for x, y, z
-                # intensity_values = intensity.reshape(-1, 1)  # Reshape to (N, 1) for intensity
-
-    #             # Combine XYZ and intensity into a single array (x, y, z, intensity)
-    #             points_list = np.hstack((xyz_points, intensity_values))  # Shape (N, 4)
-
-    #             # Create a header for the PointCloud2 message
-    #             header = Header()
-    #             header.frame_id = self.config_file['lidar']['frame_id']
-    #             # Set the timestamp based on the LiDAR's timestamp mode
-    #             if self.config_file['lidar']['timestamp_mode'] == "System_Time":
-    #                 # Use the current ROS time or system time if not using PTP or sync pulse
-    #                 header.stamp = self.get_clock().now().to_msg()
-             
-    #             else:    
-    #                 # Use the LiDAR's internal timestamp ->  if self.timestamp_mode in [client.TimestampMode.TIME_FROM_PTP_1588, client.TimestampMode.TIME_FROM_SYNC_PULSE_IN,client.TimestampMode.TIME_FROM_INTERNAL_OSC]:
-    #                 lidar_time = scan.timestamp
-    #                 header.stamp.sec = int(lidar_time // 1_000_000_000)
-    #                 header.stamp.nanosec = int(lidar_time % 1_000_000_000)
-
-
-    #             # Define the fields (x, y, z, intensity) for the PointCloud2 message
-    #             fields = [
-    #                 PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
-    #                 PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
-    #                 PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
-    #                 PointField(name='intensity', offset=12, datatype=PointField.FLOAT32, count=1)
-    #             ]
-
-    #             # Create the PointCloud2 message
-    #             pc2_msg = pc2.create_cloud(header, fields, points_list)
-
-    #             # Publish the message
-    #             self.publisher.publish(pc2_msg)
-    #             # self.get_logger().info(f"Published {len(points_list)} points with intensity. Timestamp: {header.stamp.sec}.{header.stamp.nanosec} {self.config_file['lidar']['timestamp_mode']}")
-    
-    
     def publish_pointcloud(self):
         import cv2
         with closing(sensor.SensorScanSource(self.hostname, lidar_port=self.config.udp_port_lidar)) as stream:

@@ -109,8 +109,8 @@ ros2 run sensors ouster_node --ros-args --remap use_sim_time:=false
 ros2 run sensors zed_node --ros-args --remap use_sim_time:=false
 ```
 ```bash
-# Start ELP Camera
-ros2 run sensors elp_node --ros-args --remap use_sim_time:=false
+# Start Camera
+ros2 run sensors camera_node --ros-args --remap use_sim_time:=false
 ```
 
 ### Data Recording
@@ -231,7 +231,7 @@ Camera intrinsic calibration determines the internal parameters affecting 3D-to-
 2. Detect corners
 3. Apply Zhang's method
 
-After calibration, update in config files ([Zed_camera](/sensors/config/zed_config.yaml), [Elp_camera](/sensors/config/elp_config.yaml)):
+After calibration, update in config files ([Zed_camera](/sensors/config/zed_config.yaml), [Camera](/sensors/config/camera_config.yaml)):
 ```yaml
 # Maps 3D camera coordinates → 2D image points
 distortion: [k1, k2, p1, p2, k3]

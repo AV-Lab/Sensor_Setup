@@ -1,5 +1,5 @@
 camera:
-  id: 0  # Camera ID (change if necessary)
+  id: 2  # Camera ID (change if necessary)
   fps: 30  # Frames per second
   resolution: HD1080  # Options: VGA, HD720, HD1080, HD2K
   height: 1080
@@ -7,10 +7,10 @@ camera:
   timestamp_mode: "System_Time"  # Options: System_Time, Camera_Time
 
 ROS:
-  topic_name: '/elp/image_raw'  # Main image topic
+  topic_name: '/camera/image_raw'  # Main image topic
   queue_size: 10
-  frame_id: 'elp_camera_frame'  # Camera frame ID for tf
-  camera_info_topic: '/elp/camera_info'  # Camera calibration info topic
+  frame_id: 'camera_frame'  # Camera frame ID for tf
+  camera_info_topic: '/camera/camera_info'  # Camera calibration info topic
 
 qos:
   reliability: BEST_EFFORT  # Options: RELIABLE, BEST_EFFORT

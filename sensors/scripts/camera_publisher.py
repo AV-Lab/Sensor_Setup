@@ -12,9 +12,9 @@ import numpy as np
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSDurabilityPolicy, QoSHistoryPolicy
 from rclpy.qos import QoSLivelinessPolicy
 
-class ELPCameraPublisher(Node):
+class CameraPublisher(Node):
     def __init__(self):
-        super().__init__('elp_camera_publisher')
+        super().__init__('camera_publisher')
 
         # Get use_sim_time parameter
         use_sim_time = self.get_parameter('use_sim_time').get_parameter_value().bool_value
@@ -41,7 +41,7 @@ class ELPCameraPublisher(Node):
         self.cap.set(cv2.CAP_PROP_FPS, self.config['camera']['fps'])
 
         if not self.cap.isOpened():
-            self.get_logger().error("Failed to open ELP camera")
+            self.get_logger().error("Failed to open camera")
             exit(1)
 
         # QoS profile
@@ -70,7 +70,7 @@ class ELPCameraPublisher(Node):
         package_share_directory = get_package_share_directory('sensors')
         
         # Construct the path to config file in the 'config' directory
-        config_file_path = os.path.join(package_share_directory, 'config', 'elp_config.yaml')
+        config_file_path = os.path.join(package_share_directory, 'config', 'camera_config.yaml')
         
         return config_file_path
     
@@ -106,7 +106,7 @@ class ELPCameraPublisher(Node):
             self.camera_info.header.stamp = image_timestamp
             self.camera_info_publisher.publish(self.camera_info)
         else:
-            self.get_logger().warn("Failed to capture frame from ELP camera")
+            self.get_logger().warn("Failed to capture frame from camera")
 
     def get_camera_info(self):
         self.camera_info.header.frame_id = self.config['ROS']['frame_id']
@@ -134,14 +134,14 @@ class ELPCameraPublisher(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    elp_camera_publisher = ELPCameraPublisher()
+    camera_publisher = CameraPublisher()
     try:
-        rclpy.spin(elp_camera_publisher)
+        rclpy.spin(camera_publisher)
     except KeyboardInterrupt:
         pass
     finally:
-        elp_camera_publisher.shutdown()
-        elp_camera_publisher.destroy_node()
+        camera_publisher.shutdown()
+        camera_publisher.destroy_node()
         rclpy.shutdown()
 
 if __name__ == '__main__':
