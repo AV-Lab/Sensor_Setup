@@ -19,15 +19,16 @@ class SensorSyncSaverNode(Node):
         super().__init__('sensor_sync_saver_node')
 
         # Now we can safely get and use the parameter
-        use_sim_time = self.get_parameter('use_sim_time').get_parameter_value().bool_value
-        self.get_logger().info(f'use_sim_time is set to: {use_sim_time}')
+        self.use_sim_time = self.get_parameter('use_sim_time').get_parameter_value().bool_value
+        self.get_logger().info(f'use_sim_time is set to: { self.use_sim_time}')
+        
         # Load configuration
         config_path = self.load_yaml_file()
         with open(config_path, 'r') as config_file:
             self.config_file = yaml.safe_load(config_file)  
         
         
-        self.num_saves = self.config_file['Sync']['threshold'] 
+        self.num_saves = self.config_file['Sync']['total_samples'] 
         self.image_folder = self.config_file['Sync']['img_folder'] 
         self.pcd_folder = self.config_file['Sync']['pcd_folder'] 
         self.delay_set = self.config_file['Sync']['set_delay']
@@ -35,24 +36,51 @@ class SensorSyncSaverNode(Node):
         self.set_size = self.config_file['Sync']['set_size']
         self.save_count = 0
         self.cv_bridge = CvBridge()
+        self.print_data()
         
         
         # Create output directories
         os.makedirs(self.image_folder, exist_ok=True)
         os.makedirs(self.pcd_folder, exist_ok=True)
+        camera_qos_profile = rclpy.qos.QoSProfile(
+            depth=10,
+            reliability=rclpy.qos.ReliabilityPolicy.BEST_EFFORT,
+            durability=rclpy.qos.DurabilityPolicy.VOLATILE
+        )
+        lidar_qos_profile = rclpy.qos.QoSProfile(
+            depth=10,
+            reliability=rclpy.qos.ReliabilityPolicy.BEST_EFFORT,
+            durability=rclpy.qos.DurabilityPolicy.VOLATILE
+        )   
+
         
         # Create subscribers for LiDAR and camera topics
-        lidar_sub = Subscriber(self, PointCloud2, self.config_file['ROS']['image_topic_name'])
-        camera_sub = Subscriber(self, Image, self.config_file['ROS']['pointcloud_topic_name'])
+        lidar_sub = Subscriber(self, PointCloud2, self.config_file['ROS']['pointcloud_topic_name'],qos_profile=lidar_qos_profile)
+        camera_sub = Subscriber(self, Image, self.config_file['ROS']['image_topic_name'],  qos_profile=camera_qos_profile)
+
+
+        # lidar_sub= self.create_subscription(
+        #     PointCloud2,
+        #     self.config_file['ROS']['pointcloud_topic_name'],
+        #    self.lidar_callback, qos_profile=lidar_qos_profile) 
+        # camera_sub= self.create_subscription(
+        #     Image,
+        #     self.config_file['ROS']['image_topic_name'],
+        #    self.camera_callback,     
+        #     qos_profile=camera_qos_profile)     
         
         # Create approximate time synchronizer
         sync = ApproximateTimeSynchronizer(
             [lidar_sub, camera_sub],
             queue_size=10,
-            slop= self.config_file['Sync']['threshold']  
+            slop=self.config_file['Sync']['threshold']  
         )
         sync.registerCallback(self.sync_callback)
     
+    def lidar_callback(self, msg):
+        self.get_logger().info('LiDAR data received')
+    def camera_callback(self, msg):
+        self.get_logger().info('Camera data received')
     def print_data(self):
         self.get_logger().info("Save Node initialized with the following parameters:")
         self.get_logger().info(f"Number of saves: {self.num_saves}")
@@ -62,6 +90,9 @@ class SensorSyncSaverNode(Node):
         self.get_logger().info(f"Delay frames: {self.delay_frames}")
         self.get_logger().info(f"Set size: {self.set_size}")
         self.get_logger().info(f"Use simulated time: {self.use_sim_time}")
+        self.get_logger().info(f"LiDAR topic: {self.config_file['ROS']['pointcloud_topic_name']}")
+        self.get_logger().info(f"Camera topic: {self.config_file['ROS']['image_topic_name']}")
+        self.get_logger().info("Waiting for synchronized data...")
     def sync_callback(self, lidar_msg, camera_msg):
         if self.save_count >= self.num_saves:
             self.get_logger().info('Finished saving all data pairs. Shutting down...')
@@ -96,7 +127,7 @@ class SensorSyncSaverNode(Node):
         pcd.colors = o3d.utility.Vector3dVector(colors)  # Set as color
 
 
-        pcd_filename =f'{self.image_folder}/pc_{self.save_count:04d}.pcd'
+        pcd_filename =f'{self.pcd_folder}/pc_{self.save_count:04d}.pcd'
         # Save the point cloud as a .pcd file
         o3d.io.write_point_cloud(pcd_filename, pcd)
         # self.save_pointcloud2(lidar_msg, pcd_filename)
