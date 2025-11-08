@@ -5,3 +5,9 @@ ROS:
 
 Sync:
   threshold: 0.05 # tolerace for synchronization in secs
+  img_folder: 'images'
+  pcd_folder: 'pcds'
+  total_samples: 20 # total number of samples to save
+  frame_delay: 5 # delay in frames between samples
+  set_delay: 50 # delay between sets in secs
+  set_size: 5 # number of samples in one set

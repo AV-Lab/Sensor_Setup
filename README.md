@@ -244,7 +244,7 @@ rectification: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
 #### 🤖 ROS2 Based Calibration
 ```bash
 # Install ROS calibration package
-sudo apt-get install ros-<ros2-distro>-camera-calibration
+sudo apt-get install ros-$ROS-camera-calibration
 
 # Run calibration node for monocular camera
 ros2 run camera_calibration cameracalibrator --size 8x6 --square 0.108 image:=/camera/image_raw camera:=/camera/camera_info

@@ -28,7 +28,7 @@ class SensorSyncSaverNode(Node):
         
         
         self.num_saves = self.config_file['Sync']['threshold'] 
-        self.image_folder = self.config_file['Sync']['threshold'] 
+        self.image_folder = self.config_file['Sync']['img_folder'] 
         self.pcd_folder = self.config_file['Sync']['pcd_folder'] 
         self.delay_set = self.config_file['Sync']['set_delay']
         self.delay_frames = self.config_file['Sync']['frame_delay']
@@ -119,10 +119,11 @@ class SensorSyncSaverNode(Node):
     
     def load_yaml_file(self):
         # Get the directory of the package's shared files
-        package_share_directory = get_package_share_directory('sensor')
+        package_share_directory = get_package_share_directory('sensors')
         
         # Construct the path to 'zed_config.yaml' in the 'config' directory
-        config_file_path = os.path.join(package_share_directory, 'config', 'ouster_config.yaml')
+        config_file_path = os.path.join(package_share_directory, 'config', 'save_sample.yaml')
+        return config_file_path
 
 def main(args=None):
     rclpy.init(args=args)
