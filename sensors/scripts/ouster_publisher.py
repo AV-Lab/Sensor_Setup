@@ -159,65 +159,118 @@ class OusterLidarPublisher(Node):
         return config_file_path
 
     def publish_pointcloud(self):
-        import cv2
-        with closing(sensor.SensorScanSource(self.hostname, lidar_port=self.config.udp_port_lidar)) as stream:
-            show = True
-            while show:
-                for scan, *_ in stream:
-                    if scan is None:
-                        continue
-                    # uncomment if you'd like to see frame id printed
-                    # print("frame id: {} ".format(scan.frame_id))
-                    xyzlut = core.XYZLut(self.metadata)
-                    xyz = xyzlut(scan)
-                    reflectivity = core.destagger(stream.sensor_info[0],
-                                            scan.field(core.ChanField.REFLECTIVITY))
-                    reflectivity = (reflectivity / np.max(reflectivity) * 255).astype(np.uint8)
+        fields = [
+            PointField(
+                name='x', offset=0, datatype=PointField.FLOAT32, count=1
+            ),
+            PointField(
+                name='y', offset=4, datatype=PointField.FLOAT32, count=1
+            ),
+            PointField(
+                name='z', offset=8, datatype=PointField.FLOAT32, count=1
+            ),
+            PointField(
+                name='intensity',
+                offset=12,
+                datatype=PointField.FLOAT32,
+                count=1,
+            ),
+        ]
 
-                                    
-                    # intensity = scan.field(core.ChanField.REFLECTIVITY)  # Intensity field
+        with closing(
+            sensor.SensorScanSource(
+                self.hostname,
+                lidar_port=self.config.udp_port_lidar,
+            )
+        ) as stream:
+            metadata = stream.sensor_info[0]
+            xyz_lut = core.XYZLut(metadata)
+            warned_about_empty_scan = False
+            warned_about_timestamp = False
 
-                    # Reshape XYZ and intensity fields
-                    xyz_points = xyz.reshape(-1, 3)  # Reshape to (N, 3) for x, y, z
-                    intensity_values = reflectivity.reshape(-1, 1)  # Reshape to (N, 1) for intensity
+            use_sensor_timestamp = (
+                self.config_file['lidar']['timestamp_mode'] != 'System_Time'
+            )
+            if (
+                use_sensor_timestamp
+                and metadata.config.timestamp_mode
+                == TimestampMode.TIME_FROM_INTERNAL_OSC
+            ):
+                self.get_logger().warning(
+                    'LiDAR timestamps are relative to sensor power-on. '
+                    'They cannot be synchronized directly with camera epoch '
+                    'timestamps.'
+                )
 
-                    #Combine XYZ and intensity into a single array (x, y, z, intensity)
-                    points_list = np.hstack((xyz_points, intensity_values))  # Shape (N, 4)
+            for scans in stream:
+                if not rclpy.ok():
+                    break
 
-                    # Create a header for the PointCloud2 message
-                    header = Header()
-                    header.frame_id = self.config_file['lidar']['frame_id']
-                    # Set the timestamp based on the LiDAR's timestamp mode
-                    if self.config_file['lidar']['timestamp_mode'] == "System_Time":
-                        # Use the current ROS time or system time if not using PTP or sync pulse
-                        header.stamp = self.get_clock().now().to_msg()
-                
-                    else:    
-                        # Use the LiDAR's internal timestamp ->  if self.timestamp_mode in [client.TimestampMode.TIME_FROM_PTP_1588, client.TimestampMode.TIME_FROM_SYNC_PULSE_IN,client.TimestampMode.TIME_FROM_INTERNAL_OSC]:
-                        lidar_time = scan.timestamp
-                        header.stamp.sec = int(lidar_time // 1_000_000_000)
-                        header.stamp.nanosec = int(lidar_time % 1_000_000_000)
+                scan = scans[0]
+                if scan is None:
+                    continue
 
+                ranges = scan.field(core.ChanField.RANGE)
+                reflectivity = scan.field(core.ChanField.REFLECTIVITY)
+                xyz = xyz_lut(scan)
 
-                    # Define the fields (x, y, z, intensity) for the PointCloud2 message
-                    fields = [
-                        PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
-                        PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
-                        PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
-                        PointField(name='intensity', offset=12, datatype=PointField.FLOAT32, count=1)
+                # LidarScan fields and XYZLut output are both in native
+                # staggered order. Apply the same mask to all of them so each
+                # XYZ point keeps the reflectivity measured by that pixel.
+                valid_columns = (scan.status & 0x01) != 0
+                valid_points = (
+                    (ranges > 0)
+                    & valid_columns[np.newaxis, :]
+                    & np.isfinite(xyz).all(axis=-1)
+                )
+
+                if not np.any(valid_points):
+                    if not warned_about_empty_scan:
+                        self.get_logger().warning(
+                            'Skipping LiDAR scan with no valid points.'
+                        )
+                        warned_about_empty_scan = True
+                    continue
+
+                warned_about_empty_scan = False
+                xyz_points = xyz[valid_points].astype(np.float32, copy=False)
+                intensity_values = reflectivity[valid_points].astype(
+                    np.float32, copy=False
+                )
+                points = np.column_stack((xyz_points, intensity_values))
+
+                header = Header()
+                header.frame_id = self.config_file['lidar']['frame_id']
+
+                if self.config_file['lidar']['timestamp_mode'] == 'System_Time':
+                    header.stamp = self.get_clock().now().to_msg()
+                else:
+                    # A scan contains one timestamp per column. Use the middle
+                    # of its valid acquisition interval as the single timestamp
+                    # representing the complete PointCloud2 message.
+                    valid_timestamps = scan.timestamp[
+                        valid_columns & (scan.timestamp > 0)
                     ]
+                    if valid_timestamps.size == 0:
+                        if not warned_about_timestamp:
+                            self.get_logger().warning(
+                                'Skipping LiDAR scan with no valid timestamp.'
+                            )
+                            warned_about_timestamp = True
+                        continue
 
-                    # Create the PointCloud2 message
-                    pc2_msg = pc2.create_cloud(header, fields, points_list)
+                    warned_about_timestamp = False
+                    first_timestamp = int(valid_timestamps.min())
+                    last_timestamp = int(valid_timestamps.max())
+                    lidar_time_ns = (
+                        first_timestamp
+                        + (last_timestamp - first_timestamp) // 2
+                    )
+                    header.stamp.sec = lidar_time_ns // 1_000_000_000
+                    header.stamp.nanosec = lidar_time_ns % 1_000_000_000
 
-                    # Publish the message
-                    self.publisher.publish(pc2_msg)
-                    # self.get_logger().info(f"Published {len(points_list)} points with intensity. Timestamp: {header.stamp.sec}.{header.stamp.nanosec} {self.config_file['lidar']['timestamp_mode']}")
-        
-
-                    # print(xyz)
-                    # cv2.imshow("scaled reflectivity", reflectivity)
-                    # key = cv2.waitKey(1) & 0xFF
+                pointcloud = pc2.create_cloud(header, fields, points)
+                self.publisher.publish(pointcloud)
 def main(args=None):
     rclpy.init(args=args)
     # opt = parse_opt()

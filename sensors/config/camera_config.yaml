@@ -1,75 +1,68 @@
 camera:
-  id: 1  # Camera ID (change if necessary)
-  fps: 20  # Frames per second
-  resolution: HD1080  # Options: VGA, HD720, HD1080, HD2K
-  height: 1080
+  # Automatically selects the one matching video-index0 entry under
+  # /dev/v4l/by-id, so /dev/video numbering may change safely.
+  device: "auto"
+  device_match: "See3CAM_24CUG"
+  backend: "V4L2"
+  pixel_format: "UYVY"
   width: 1920
-  timestamp_mode: "System_Time"  # Options: System_Time, Camera_Time
+  height: 1080
+  fps: 20.0
+  strict_mode: true
+
+capture:
+  # This implementation supports host_receipt only which is
+  # captured immediately after grab(), before frame decoding and publication.
+  # It is still a USB arrival time, not the camera exposure time.
+  timestamp_source: "host_receipt"
+  buffer_size: 1
+  warmup_frames: 30
+  max_consecutive_failures: 3
+  diagnostics_interval_sec: 5.0
+
+controls:
+  # Leave disabled until `v4l2-ctl --list-ctrls-menus` has been checked for
+  # the connected camera. OpenCV control ranges are backend-specific.
+  apply_standard_controls: false
+  auto_exposure: true
+  auto_white_balance: true
+  exposure: null
+  gain: null
+  brightness: null
+  contrast: null
+  saturation: null
+  sharpness: null
 
 ROS:
-  topic_name: '/camera/image_raw'  # Main image topic
-  queue_size: 10
-  frame_id: 'camera_frame'  # Camera frame ID for tf
-  camera_info_topic: '/camera/camera_info'  # Camera calibration info topic
+  # This topic contains unrectified BGR pixels. Rectification belongs in
+  # image_proc or a separate node.
+  topic_name: "/camera/image_raw"
+  camera_info_topic: "/camera/camera_info"
+  frame_id: "camera_optical_frame"
 
 qos:
-  reliability: BEST_EFFORT  # Options: RELIABLE, BEST_EFFORT
-  history: KEEP_LAST  # Options: KEEP_LAST, KEEP_ALL
-  depth: 1  # How many messages to keep in history
+  reliability: "BEST_EFFORT"
+  history: "KEEP_LAST"
+  depth: 1
 
 intrinsics:
-  # Distortion coefficients [k1, k2, p1, p2, k3]
+  # These values belong to the previous camera setup. Recalibrate the
+  # See3CAM at the final resolution, lens, focus, and image mode, then set
+  # calibrated=true. While false, the publisher emits CameraInfo with K[0]=0.
+  calibrated: false
   distortion: [-0.309971, 0.077002, 0.007850, 0.002471, 0.000000]
-#[0.0, 0.0, 0.0, 0.0, 0.0]  
-  
-  # Camera matrix (3x3 matrix in row-major format)
-  # [fx,  0, cx]
-  # [ 0, fy, cy]
-  # [ 0,  0,  1]
-  # camera_matrix_K: [
-  #   1108.145514, 0.0, 980.526233,
-  #   0.0, 1109.205787, 546.265441,
-  #   0.0, 0.0, 1.0
-  # ]
   camera_matrix_K: [
     780.502801, 0.0, 933.156822,
     0.0, 1015.107615, 524.779278,
     0.0, 0.0, 1.0
   ]
-  
-  # Rectification matrix (3x3 matrix, usually identity for monocular cameras)
   rectification: [
     1.0, 0.0, 0.0,
     0.0, 1.0, 0.0,
     0.0, 0.0, 1.0
   ]
-  
-  # Projection matrix (3x4 matrix)
-  # projection: [
-  #   1153.806674, 0.0, 942.859434, 0.0,
-  #   0.0, 1156.223082, 536.992462, 0.0,
-  #   0.0, 0.0, 1.0, 0.0
-  # ]
   projection: [
-    780.502801 , 0.0, 933.156822, 0.0,
+    780.502801, 0.0, 933.156822, 0.0,
     0.0, 1015.107615, 524.779278, 0.0,
     0.0, 0.0, 1.0, 0.0
   ]
-# Camera calibration settings
-calibration:
-  enable_auto_exposure: true
-  enable_auto_white_balance: true
-  gain: 100  # Camera gain (0-100)
-  exposure: 100  # Camera exposure (0-100)
-  brightness: 50  # Camera brightness (0-100)
-  contrast: 50  # Camera contrast (0-100)
-  saturation: 50  # Camera saturation (0-100)
-  sharpness: 50  # Camera sharpness (0-100)
-
-# Advanced settings
-advanced:
-  buffer_size: 1  # Frame buffer size
-  enable_timestamp_sync: true  # Enable timestamp synchronization
-  max_retry_count: 3  # Maximum number of retries on camera failure
-  warmup_frames: 30  # Number of frames to drop during camera warmup
-  enable_logging: true  # Enable detailed logging

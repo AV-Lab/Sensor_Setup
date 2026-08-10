@@ -1,38 +1,37 @@
+"""Launch live LiDAR and V4L2 camera publishers."""
+
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, TimerAction
+from launch.actions import TimerAction
 from launch_ros.actions import Node
 
+
 def generate_launch_description():
+    """Launch the live Ouster and generic V4L2 camera publishers."""
     return LaunchDescription([
-        # First node: start without delay
-        Node(
-            package='sensors',
-            executable='clock_node',  # Replace with your script name
-            name='clock_node',
-            output='screen'
-        ),
-        # Second node: starts 5 seconds after the first
+        # Live sensors use the PTP-disciplined system clock. Do not publish
+        # /clock unless running a simulator or rosbag with use_sim_time=true.
         TimerAction(
-            period=5.0,  # Delay in seconds
+            period=1.0,
             actions=[
                 Node(
                     package='sensors',
-                    executable='ouster_node',  # Replace with your script name
+                    executable='ouster_node',
                     name='ouster_node',
-                    output='screen'
+                    output='screen',
+                    parameters=[{'use_sim_time': False}],
                 )
-            ]
+            ],
         ),
-        # Third node: starts 10 seconds after the first
         TimerAction(
-            period=1.0,  # Delay in seconds
+            period=1.0,
             actions=[
                 Node(
                     package='sensors',
-                    executable='zed_node',  # Replace with your script name
-                    name='zed_node',
-                    output='screen'
+                    executable='camera_node',
+                    name='camera_node',
+                    output='screen',
+                    parameters=[{'use_sim_time': False}],
                 )
-            ]
+            ],
         ),
     ])
