@@ -13,10 +13,14 @@ from ouster.sdk import core, sensor
 import rclpy
 from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
-from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import (
+    DurabilityPolicy,
+    HistoryPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+)
 from sensor_msgs.msg import PointCloud2, PointField
-from sensor_msgs_py import point_cloud2 as pc2
-from std_msgs.msg import Header
+from std_msgs.msg import Header, String
 import yaml
 
 
@@ -68,6 +72,21 @@ XYZI_FIELDS = [
         count=1,
     ),
 ]
+ACTIVE_CONFIG_FIELDS = (
+    'udp_dest',
+    'udp_port_lidar',
+    'udp_port_imu',
+    'timestamp_mode',
+    'lidar_mode',
+    'operating_mode',
+    'multipurpose_io_mode',
+    'azimuth_window',
+    'phase_lock_enable',
+    'phase_lock_offset',
+    'udp_profile_lidar',
+    'udp_profile_imu',
+    'columns_per_packet',
+)
 
 
 def _configured_enum(mapping, configured_value, setting_name):
@@ -232,6 +251,51 @@ def valid_column_ratio(valid_columns):
     return float(np.count_nonzero(columns)) / columns.size
 
 
+def dropped_scan_count(stream):
+    """Read the SDK 0.15.1 dropped-scan property as an integer."""
+    return int(stream.dropped_scans)
+
+
+def _json_value(value):
+    """Convert SDK enum and container values to JSON-safe primitives."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_value(item) for item in value]
+    name = getattr(value, 'name', None)
+    return str(name if name is not None else value)
+
+
+def sensor_config_document(config):
+    """Serialize accuracy-relevant active Ouster settings."""
+    return {
+        name: _json_value(getattr(config, name, None))
+        for name in ACTIVE_CONFIG_FIELDS
+    }
+
+
+def make_xyzi_cloud(header, points):
+    """Pack contiguous float32 XYZI rows directly into PointCloud2."""
+    points = np.asarray(points)
+    if points.ndim != 2 or points.shape[1] != 4:
+        raise ValueError('Point cloud data must have shape (N, 4).')
+    points = np.ascontiguousarray(points, dtype='<f4')
+
+    message = PointCloud2()
+    message.header = header
+    message.height = 1
+    message.width = int(points.shape[0])
+    message.fields = XYZI_FIELDS
+    message.is_bigendian = False
+    message.point_step = 16
+    message.row_step = message.point_step * message.width
+    message.data = points.tobytes(order='C')
+    message.is_dense = True
+    return message
+
+
 def ptp_timestamp_to_ros_ns(
     ptp_timestamp_ns,
     utc_tai_offset_ns,
@@ -289,6 +353,17 @@ class OusterLidarPublisher(Node):
             PointCloud2,
             self.config_file['ROS']['topic_name'],
             self._make_qos_profile(),
+        )
+        metadata_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
+        self.runtime_metadata_publisher = self.create_publisher(
+            String,
+            self.config_file['ROS']['runtime_metadata_topic'],
+            metadata_qos,
         )
         self._health_clock = Clock(clock_type=ClockType.STEADY_TIME)
         self._health_timer = self.create_timer(
@@ -587,6 +662,38 @@ class OusterLidarPublisher(Node):
                 f'Unknown lidar.info_mode {mode!r}; using minimal output.'
             )
 
+    def _publish_runtime_metadata(self, metadata):
+        """Publish durable sensor metadata and verified active configuration."""
+        try:
+            sensor_information = json.loads(metadata.to_json_string())
+        except (AttributeError, TypeError, json.JSONDecodeError) as error:
+            raise RuntimeError(
+                f'Cannot serialize active Ouster metadata: {error}'
+            ) from error
+        document = {
+            'schema_version': 1,
+            'publisher': 'sensors.ouster_node',
+            'hostname': self.hostname,
+            'sensor_info': sensor_information,
+            'active_config': sensor_config_document(self.active_config),
+            'ros_policy': {
+                'frame_id': self.lidar_config['frame_id'],
+                'timestamp_mode': self.timestamp_mode_name,
+                'ros_stamp_source': self.ros_stamp_source,
+                'ptp_utc_tai_offset_sec': self.ptp_utc_tai_offset_sec,
+                'minimum_valid_column_ratio': (
+                    self.min_scan_valid_columns_ratio
+                ),
+            },
+        }
+        message = String()
+        message.data = json.dumps(document, sort_keys=True, allow_nan=False)
+        self.runtime_metadata_publisher.publish(message)
+        self.get_logger().info(
+            'Published durable Ouster runtime metadata on '
+            f'{self.config_file["ROS"]["runtime_metadata_topic"]}.'
+        )
+
     def _set_cloud_stamp(self, header, scan, valid_columns, receipt_stamp):
         """Set the cloud header stamp according to the configured policy."""
         if self.ros_stamp_source == 'host_receipt':
@@ -714,9 +821,10 @@ class OusterLidarPublisher(Node):
             metadata = stream.sensor_info[0]
             xyz_lut = core.XYZLut(metadata)
             self._log_setup(metadata)
+            self._publish_runtime_metadata(metadata)
             warned_about_empty_scan = False
             warned_about_timestamp = False
-            last_dropped_scans = int(stream.dropped_scans())
+            last_dropped_scans = dropped_scan_count(stream)
 
             for scans in stream:
                 if (
@@ -725,7 +833,7 @@ class OusterLidarPublisher(Node):
                 ):
                     break
 
-                dropped_scans = int(stream.dropped_scans())
+                dropped_scans = dropped_scan_count(stream)
                 if dropped_scans > last_dropped_scans:
                     self.get_logger().warning(
                         f'Ouster receive queue dropped '
@@ -795,10 +903,9 @@ class OusterLidarPublisher(Node):
                 )
                 points = np.column_stack((xyz_points, reflectivity))
 
-                pointcloud = pc2.create_cloud(header, XYZI_FIELDS, points)
-                # The common validity mask removed zero-range and non-finite
-                # points, so downstream consumers can trust the dense flag.
-                pointcloud.is_dense = True
+                # The array already matches x/y/z/reflectivity as four
+                # contiguous float32 values, so packing is one bulk copy.
+                pointcloud = make_xyzi_cloud(header, points)
                 self.publisher.publish(pointcloud)
         finally:
             self._close_stream(expected_stream=stream)

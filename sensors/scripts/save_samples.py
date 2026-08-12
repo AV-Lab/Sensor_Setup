@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import threading
 import time
 import uuid
 
@@ -14,11 +15,21 @@ from message_filters import ApproximateTimeSynchronizer, Subscriber
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import Image, PointCloud2
+from rclpy.qos import (
+    DurabilityPolicy,
+    HistoryPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+)
+from sensor_msgs.msg import CameraInfo, Image, PointCloud2
 from sensor_msgs_py import point_cloud2
+from std_msgs.msg import String
 from std_srvs.srv import Trigger
 import yaml
+
+from scripts.manual_capture_preview import evaluate_manual_preview
+from scripts.manual_capture_preview import load_preview_contract
+from scripts.manual_capture_preview import render_manual_preview
 
 
 SUPPORTED_CAPTURE_MODES = {'manual', 'interval'}
@@ -36,6 +47,69 @@ SESSION_NAME_PATTERN = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]*')
 def stamp_to_ns(stamp):
     """Convert a ROS time message to integer nanoseconds."""
     return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+
+
+def camera_info_message_to_document(message):
+    """Serialize the active CameraInfo values needed to reproduce projection."""
+    document = {
+        'stamp_ns': stamp_to_ns(message.header.stamp),
+        'frame_id': message.header.frame_id,
+        'width': int(message.width),
+        'height': int(message.height),
+        'distortion_model': message.distortion_model,
+        'd': [float(value) for value in message.d],
+        'k': [float(value) for value in message.k],
+        'r': [float(value) for value in message.r],
+        'p': [float(value) for value in message.p],
+        'binning_x': int(message.binning_x),
+        'binning_y': int(message.binning_y),
+        'roi': {
+            'x_offset': int(message.roi.x_offset),
+            'y_offset': int(message.roi.y_offset),
+            'height': int(message.roi.height),
+            'width': int(message.roi.width),
+            'do_rectify': bool(message.roi.do_rectify),
+        },
+    }
+    numeric = document['d'] + document['k'] + document['r'] + document['p']
+    if not np.isfinite(numeric).all():
+        raise ValueError('CameraInfo contains non-finite calibration values.')
+    document['calibrated'] = bool(
+        len(document['k']) == 9
+        and document['k'][0] > 0.0
+        and document['k'][4] > 0.0
+        and document['k'][8] != 0.0
+    )
+    return document
+
+
+def decode_runtime_metadata(message, source, expected_publisher=None):
+    """Decode one durable publisher metadata message as a JSON mapping."""
+    def reject_nonstandard_constant(value):
+        raise ValueError(f'non-finite JSON value {value}')
+
+    try:
+        document = json.loads(
+            message.data,
+            parse_constant=reject_nonstandard_constant,
+        )
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError(f'{source} runtime metadata is invalid JSON.') from error
+    if not isinstance(document, dict):
+        raise ValueError(f'{source} runtime metadata must be a JSON object.')
+    if document.get('schema_version') != 1:
+        raise ValueError(
+            f'{source} runtime metadata has an unsupported schema version.'
+        )
+    if (
+        expected_publisher is not None
+        and document.get('publisher') != expected_publisher
+    ):
+        raise ValueError(
+            f'{source} runtime metadata did not come from '
+            f'{expected_publisher!r}.'
+        )
+    return document
 
 
 def image_message_to_bgr(message):
@@ -152,7 +226,7 @@ def make_binary_pcd(points, value_field):
 
 def validate_save_config(config):
     """Validate the saver configuration without silently coercing values."""
-    for section_name in ('ROS', 'Sync', 'Capture'):
+    for section_name in ('ROS', 'Sync', 'Capture', 'ManualPreview'):
         if not isinstance(config.get(section_name), dict):
             raise ValueError(
                 f'Missing save configuration section {section_name!r}.'
@@ -161,7 +235,10 @@ def validate_save_config(config):
     ros = config['ROS']
     for key in (
         'image_topic_name',
+        'camera_info_topic_name',
         'pointcloud_topic_name',
+        'camera_runtime_metadata_topic',
+        'lidar_runtime_metadata_topic',
         'save_service_name',
     ):
         if not isinstance(ros.get(key), str) or not ros[key]:
@@ -183,6 +260,9 @@ def validate_save_config(config):
     _require_number(capture, 'max_pair_age_sec', minimum=0.001)
     _require_integer(capture, 'min_point_count', minimum=1)
     _require_number(capture, 'diagnostics_interval_sec', minimum=0.1)
+    for key in ('require_runtime_metadata', 'require_calibrated_camera_info'):
+        if not isinstance(capture.get(key), bool):
+            raise ValueError(f'Capture.{key} must be true or false.')
 
     output_root = capture.get('output_root')
     if not isinstance(output_root, str) or not output_root:
@@ -195,6 +275,19 @@ def validate_save_config(config):
         raise ValueError(
             'Capture.session_name must be "auto" or a simple file name.'
         )
+
+    preview = config['ManualPreview']
+    for key in ('enabled', 'display'):
+        if not isinstance(preview.get(key), bool):
+            raise ValueError(f'ManualPreview.{key} must be true or false.')
+    _require_number(
+        preview, 'analysis_interval_sec', minimum=0.1, maximum=10.0
+    )
+    for key in ('calibration_config', 'window_name'):
+        if not isinstance(preview.get(key), str) or not preview[key]:
+            raise ValueError(
+                f'ManualPreview.{key} must be a non-empty string.'
+            )
     return config
 
 
@@ -241,6 +334,8 @@ class CaptureSession:
         self.pointclouds_directory = self.directory / 'pcds'
         self.manifest_path = self.directory / 'manifest.jsonl'
         self.summary_path = self.directory / 'summary.json'
+        self.runtime_metadata_path = self.directory / 'runtime_metadata.json'
+        self._runtime_provenance = None
 
         self.directory.mkdir(parents=True, exist_ok=False)
         self.images_directory.mkdir()
@@ -307,9 +402,25 @@ class CaptureSession:
         summary['updated_at_utc'] = datetime.now(timezone.utc).isoformat()
         self._write_json_atomic(self.summary_path, summary)
 
+    def write_runtime_provenance(self, provenance):
+        """Write immutable active sensor provenance or verify it is unchanged."""
+        canonical = json.loads(json.dumps(
+            provenance,
+            sort_keys=True,
+            allow_nan=False,
+        ))
+        if self._runtime_provenance is None:
+            self._write_json_atomic(self.runtime_metadata_path, canonical)
+            self._runtime_provenance = canonical
+            return
+        if canonical != self._runtime_provenance:
+            raise ValueError(
+                'Active camera or LiDAR metadata changed during the session.'
+            )
+
     def _append_manifest(self, record):
         """Durably append one completed pair record."""
-        line = json.dumps(record, sort_keys=True) + '\n'
+        line = json.dumps(record, sort_keys=True, allow_nan=False) + '\n'
         with self.manifest_path.open('a', encoding='utf-8') as manifest:
             manifest.write(line)
             manifest.flush()
@@ -318,7 +429,12 @@ class CaptureSession:
     def _write_json_atomic(self, path, value):
         """Atomically replace one JSON document."""
         content = (
-            json.dumps(value, indent=2, sort_keys=True) + '\n'
+            json.dumps(
+                value,
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            ) + '\n'
         ).encode('utf-8')
         temporary = self._write_temporary(path.parent, path.name, content)
         try:
@@ -351,6 +467,7 @@ class SensorSyncSaverNode(Node):
         self.ros_config = self.config['ROS']
         self.sync_config = self.config['Sync']
         self.capture_config = self.config['Capture']
+        self.preview_config = self.config['ManualPreview']
         self.capture_mode = self.capture_config['mode']
         self.total_samples = self.capture_config['total_samples']
         self.threshold_ns = round(
@@ -362,6 +479,52 @@ class SensorSyncSaverNode(Node):
         self.max_pair_age_ns = round(
             self.capture_config['max_pair_age_sec'] * 1_000_000_000
         )
+        self.require_runtime_metadata = self.capture_config[
+            'require_runtime_metadata'
+        ]
+        self.require_calibrated_camera_info = self.capture_config[
+            'require_calibrated_camera_info'
+        ]
+
+        self._preview_enabled = bool(
+            self.preview_config['enabled']
+            and self.capture_mode == 'manual'
+        )
+        self._preview_target = None
+        self._preview_detector_policy = None
+        if self._preview_enabled:
+            preview_config_path = Path(
+                self.preview_config['calibration_config']
+            ).expanduser()
+            if not preview_config_path.is_absolute():
+                preview_config_path = (
+                    self.config_path.parent / preview_config_path
+                )
+            (
+                self._preview_target,
+                self._preview_detector_policy,
+            ) = load_preview_contract(preview_config_path)
+
+        graphical_session = bool(
+            os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY')
+        )
+        self._preview_display_enabled = bool(
+            self._preview_enabled
+            and self.preview_config['display']
+            and graphical_session
+        )
+        self._preview_window_name = self.preview_config['window_name']
+        self._preview_stop_event = threading.Event()
+        self._preview_condition = threading.Condition()
+        self._preview_pending_pair = None
+        self._preview_thread = None
+        self._preview_frame_lock = threading.Lock()
+        self._preview_frame = None
+        self._preview_frame_sequence = 0
+        self._preview_displayed_sequence = -1
+        self._latest_preview_result = None
+        self._last_logged_preview_state = None
+        self._preview_gui_timer = None
 
         self.save_count = 0
         self.matched_count = 0
@@ -370,6 +533,8 @@ class SensorSyncSaverNode(Node):
         self._latest_delta_ns = None
         self._last_saved_measurement_ns = None
         self._last_saved_stamp_pair = None
+        self._camera_runtime_metadata = None
+        self._lidar_runtime_metadata = None
         self._expected_image_frame = None
         self._expected_lidar_frame = None
         self._complete_logged = False
@@ -386,6 +551,7 @@ class SensorSyncSaverNode(Node):
             'requested_sensor_configurations': (
                 self._load_requested_sensor_configurations()
             ),
+            'runtime_metadata_file': 'runtime_metadata.json',
             'use_sim_time': use_sim_time,
         }
         self.session = CaptureSession(
@@ -411,13 +577,42 @@ class SensorSyncSaverNode(Node):
             self.ros_config['image_topic_name'],
             qos_profile=qos,
         )
+        self._camera_info_subscriber = Subscriber(
+            self,
+            CameraInfo,
+            self.ros_config['camera_info_topic_name'],
+            qos_profile=qos,
+        )
         self._synchronizer = ApproximateTimeSynchronizer(
-            [self._lidar_subscriber, self._image_subscriber],
+            [
+                self._lidar_subscriber,
+                self._image_subscriber,
+                self._camera_info_subscriber,
+            ],
             queue_size=self.sync_config['queue_size'],
             slop=self.sync_config['threshold_sec'],
             allow_headerless=False,
         )
         self._synchronizer.registerCallback(self._synchronized_callback)
+
+        metadata_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+        )
+        self._camera_metadata_subscription = self.create_subscription(
+            String,
+            self.ros_config['camera_runtime_metadata_topic'],
+            self._camera_metadata_callback,
+            metadata_qos,
+        )
+        self._lidar_metadata_subscription = self.create_subscription(
+            String,
+            self.ros_config['lidar_runtime_metadata_topic'],
+            self._lidar_metadata_callback,
+            metadata_qos,
+        )
 
         self._save_service = self.create_service(
             Trigger,
@@ -428,6 +623,17 @@ class SensorSyncSaverNode(Node):
             self.capture_config['diagnostics_interval_sec'],
             self._log_diagnostics,
         )
+        if self._preview_enabled:
+            self._preview_thread = threading.Thread(
+                target=self._preview_worker_loop,
+                name='manual_capture_preview',
+                daemon=True,
+            )
+            self._preview_thread.start()
+            if self._preview_display_enabled:
+                self._preview_gui_timer = self.create_timer(
+                    0.05, self._update_preview_window
+                )
         self._log_setup(use_sim_time)
 
     def _resolve_config_path(self):
@@ -475,6 +681,7 @@ class SensorSyncSaverNode(Node):
         )
         self.get_logger().info(
             f'image={self.ros_config["image_topic_name"]}, '
+            f'camera_info={self.ros_config["camera_info_topic_name"]}, '
             f'cloud={self.ros_config["pointcloud_topic_name"]}'
         )
         if self.capture_mode == 'manual':
@@ -483,14 +690,172 @@ class SensorSyncSaverNode(Node):
                 f'call {self.ros_config["save_service_name"]} '
                 'std_srvs/srv/Trigger "{}"'
             )
+            if self._preview_enabled:
+                display = (
+                    'GUI and status logs'
+                    if self._preview_display_enabled
+                    else 'status logs only'
+                )
+                self.get_logger().info(
+                    'Manual camera/LiDAR target preview is advisory and uses '
+                    f'{display}; it does not gate the save service.'
+                )
+                if (
+                    self.preview_config['display']
+                    and not self._preview_display_enabled
+                ):
+                    self.get_logger().warning(
+                        'ManualPreview.display=true, but no DISPLAY or '
+                        'WAYLAND_DISPLAY is available. Preview status will '
+                        'be logged without an OpenCV window.'
+                    )
         else:
+            if self.preview_config['enabled']:
+                self.get_logger().warning(
+                    'ManualPreview is ignored in interval mode. Automatic '
+                    'target-gated capture is not implemented yet.'
+                )
             self.get_logger().warning(
                 'Interval capture is enabled. Use it only when the target '
                 'pose schedule is controlled; manual mode is safer for '
                 'calibration pose diversity.'
             )
 
-    def _synchronized_callback(self, lidar_message, image_message):
+    def _camera_metadata_callback(self, message):
+        """Cache durable active camera mode and control readback."""
+        try:
+            self._camera_runtime_metadata = decode_runtime_metadata(
+                message, 'camera', 'sensors.camera_node'
+            )
+        except ValueError as error:
+            self.get_logger().error(str(error))
+
+    def _lidar_metadata_callback(self, message):
+        """Cache durable Ouster metadata and active configuration."""
+        try:
+            self._lidar_runtime_metadata = decode_runtime_metadata(
+                message, 'LiDAR', 'sensors.ouster_node'
+            )
+        except ValueError as error:
+            self.get_logger().error(str(error))
+
+    def _submit_preview_pair(
+        self, lidar_message, image_message, camera_info_message, received_ns
+    ):
+        """Replace any pending preview work with the newest matched pair."""
+        if not self._preview_enabled:
+            return
+        with self._preview_condition:
+            self._preview_pending_pair = (
+                lidar_message,
+                image_message,
+                camera_info_message,
+                received_ns,
+            )
+            self._preview_condition.notify()
+
+    def _preview_worker_loop(self):
+        """Analyze only the newest pair without blocking ROS callbacks."""
+        interval = float(self.preview_config['analysis_interval_sec'])
+        while not self._preview_stop_event.is_set():
+            with self._preview_condition:
+                while (
+                    self._preview_pending_pair is None
+                    and not self._preview_stop_event.is_set()
+                ):
+                    self._preview_condition.wait(timeout=0.5)
+                if self._preview_stop_event.is_set():
+                    break
+                pair = self._preview_pending_pair
+                self._preview_pending_pair = None
+
+            try:
+                self._analyze_preview_pair(*pair)
+            except Exception as error:
+                state = ('error', str(error))
+                if state != self._last_logged_preview_state:
+                    self.get_logger().error(
+                        f'Manual preview analysis failed: {error}'
+                    )
+                    self._last_logged_preview_state = state
+            self._preview_stop_event.wait(interval)
+
+    def _analyze_preview_pair(
+        self, lidar_message, image_message, camera_info_message, received_ns
+    ):
+        """Evaluate and render one advisory synchronized preview pair."""
+        del camera_info_message, received_ns
+        image_bgr = image_message_to_bgr(image_message)
+        points, value_field = pointcloud_message_to_array(lidar_message)
+        image_stamp_ns = stamp_to_ns(image_message.header.stamp)
+        lidar_stamp_ns = stamp_to_ns(lidar_message.header.stamp)
+        result, corners = evaluate_manual_preview(
+            image_bgr,
+            points,
+            value_field,
+            self._preview_target,
+            self._preview_detector_policy,
+            (image_stamp_ns - lidar_stamp_ns) / 1e6,
+        )
+        frame = render_manual_preview(
+            image_bgr,
+            points,
+            result,
+            corners,
+            self._preview_target,
+            self._preview_detector_policy,
+        )
+        with self._preview_frame_lock:
+            self._latest_preview_result = result
+            self._preview_frame = frame
+            self._preview_frame_sequence += 1
+
+        state = (
+            result['ready'],
+            result['camera_detected'],
+            result['lidar']['status'],
+        )
+        if state != self._last_logged_preview_state:
+            level = (
+                self.get_logger().info
+                if result['ready']
+                else self.get_logger().warning
+            )
+            level(
+                'Manual preview: '
+                f'camera={"detected" if result["camera_detected"] else "missing"}, '
+                f'lidar={result["lidar"]["status"]}, '
+                f'delta={result["image_minus_lidar_ms"]:.3f} ms, '
+                f'ready={result["ready"]}. '
+                'This is advisory; hold the target still before saving.'
+            )
+            self._last_logged_preview_state = state
+
+    def _update_preview_window(self):
+        """Display a newly rendered preview without running detection here."""
+        if not self._preview_display_enabled:
+            return
+        with self._preview_frame_lock:
+            sequence = self._preview_frame_sequence
+            frame = self._preview_frame
+        try:
+            if frame is None or sequence == self._preview_displayed_sequence:
+                cv2.waitKey(1)
+                return
+            cv2.imshow(self._preview_window_name, frame)
+            cv2.waitKey(1)
+            self._preview_displayed_sequence = sequence
+        except cv2.error as error:
+            self._preview_display_enabled = False
+            if self._preview_gui_timer is not None:
+                self._preview_gui_timer.cancel()
+            self.get_logger().error(
+                f'Disabling manual preview window: {error}'
+            )
+
+    def _synchronized_callback(
+        self, lidar_message, image_message, camera_info_message
+    ):
         """Cache or save one approximately synchronized message pair."""
         lidar_stamp_ns = stamp_to_ns(lidar_message.header.stamp)
         image_stamp_ns = stamp_to_ns(image_message.header.stamp)
@@ -517,10 +882,14 @@ class SensorSyncSaverNode(Node):
         self._latest_pair = (
             lidar_message,
             image_message,
+            camera_info_message,
             time.monotonic_ns(),
         )
+        self._submit_preview_pair(*self._latest_pair)
         if self.capture_mode == 'interval':
-            self._try_save_pair(lidar_message, image_message)
+            self._try_save_pair(
+                lidar_message, image_message, camera_info_message
+            )
 
     def _save_service_callback(self, request, response):
         """Save the latest fresh synchronized pair after a manual request."""
@@ -540,7 +909,12 @@ class SensorSyncSaverNode(Node):
             response.message = 'No synchronized pair has arrived yet.'
             return response
 
-        lidar_message, image_message, received_ns = self._latest_pair
+        (
+            lidar_message,
+            image_message,
+            camera_info_message,
+            received_ns,
+        ) = self._latest_pair
         age_ns = time.monotonic_ns() - received_ns
         if age_ns > self.max_pair_age_ns:
             response.success = False
@@ -551,13 +925,15 @@ class SensorSyncSaverNode(Node):
             return response
 
         success, message = self._try_save_pair(
-            lidar_message, image_message
+            lidar_message, image_message, camera_info_message
         )
         response.success = success
         response.message = message
         return response
 
-    def _try_save_pair(self, lidar_message, image_message):
+    def _try_save_pair(
+        self, lidar_message, image_message, camera_info_message
+    ):
         """Apply capture gates and persist one complete calibration pair."""
         if self.save_count >= self.total_samples:
             self._log_complete_once()
@@ -565,6 +941,7 @@ class SensorSyncSaverNode(Node):
 
         lidar_stamp_ns = stamp_to_ns(lidar_message.header.stamp)
         image_stamp_ns = stamp_to_ns(image_message.header.stamp)
+        camera_info_stamp_ns = stamp_to_ns(camera_info_message.header.stamp)
         stamp_pair = (lidar_stamp_ns, image_stamp_ns)
         if stamp_pair == self._last_saved_stamp_pair:
             return False, 'This synchronized pair was already saved.'
@@ -585,6 +962,18 @@ class SensorSyncSaverNode(Node):
 
         image_frame = image_message.header.frame_id
         lidar_frame = lidar_message.header.frame_id
+        if camera_info_message.header.frame_id != image_frame:
+            self.rejected_count += 1
+            return False, 'CameraInfo frame does not match the image frame.'
+        if (
+            int(camera_info_message.width) != int(image_message.width)
+            or int(camera_info_message.height) != int(image_message.height)
+        ):
+            self.rejected_count += 1
+            return False, 'CameraInfo dimensions do not match the image.'
+        if abs(camera_info_stamp_ns - image_stamp_ns) > self.threshold_ns:
+            self.rejected_count += 1
+            return False, 'CameraInfo stamp is outside the synchronization slop.'
         if (
             self._expected_image_frame is not None
             and image_frame != self._expected_image_frame
@@ -607,6 +996,27 @@ class SensorSyncSaverNode(Node):
         try:
             image_bgr = image_message_to_bgr(image_message)
             points, value_field = pointcloud_message_to_array(lidar_message)
+            camera_info = camera_info_message_to_document(camera_info_message)
+            if (
+                self.require_calibrated_camera_info
+                and not camera_info['calibrated']
+            ):
+                self.rejected_count += 1
+                return False, 'CameraInfo is uncalibrated (K[0] is zero).'
+            missing_metadata = [
+                name
+                for name, value in (
+                    ('camera', self._camera_runtime_metadata),
+                    ('LiDAR', self._lidar_runtime_metadata),
+                )
+                if value is None
+            ]
+            if self.require_runtime_metadata and missing_metadata:
+                self.rejected_count += 1
+                return False, (
+                    'Missing durable runtime metadata from: '
+                    + ', '.join(missing_metadata)
+                )
             if points.shape[0] < self.capture_config['min_point_count']:
                 self.rejected_count += 1
                 return False, (
@@ -619,6 +1029,10 @@ class SensorSyncSaverNode(Node):
                 'saved_at_utc': datetime.now(timezone.utc).isoformat(),
                 'image_stamp_ns': image_stamp_ns,
                 'lidar_stamp_ns': lidar_stamp_ns,
+                'camera_info_stamp_ns': camera_info_stamp_ns,
+                'camera_info_minus_image_ns': (
+                    camera_info_stamp_ns - image_stamp_ns
+                ),
                 'image_minus_lidar_ns': delta_ns,
                 'absolute_stamp_delta_ns': abs(delta_ns),
                 'image_frame_id': image_frame,
@@ -643,6 +1057,18 @@ class SensorSyncSaverNode(Node):
                     for field in lidar_message.fields
                 ],
             }
+            runtime_provenance = {
+                'schema_version': 1,
+                'publisher_metadata_complete': not missing_metadata,
+                'camera_info': {
+                    key: value
+                    for key, value in camera_info.items()
+                    if key != 'stamp_ns'
+                },
+                'camera_publisher': self._camera_runtime_metadata,
+                'lidar_publisher': self._lidar_runtime_metadata,
+            }
+            self.session.write_runtime_provenance(runtime_provenance)
             image_path, pointcloud_path = self.session.write_pair(
                 self.save_count,
                 image_bgr,
@@ -680,10 +1106,24 @@ class SensorSyncSaverNode(Node):
             if self._latest_delta_ns is None
             else f'{self._latest_delta_ns / 1e6:.3f} ms'
         )
+        with self._preview_frame_lock:
+            preview = self._latest_preview_result
+        preview_text = 'disabled'
+        if self._preview_enabled:
+            preview_text = (
+                'waiting'
+                if preview is None
+                else (
+                    f'ready={preview["ready"]}, '
+                    f'camera={preview["camera_detected"]}, '
+                    f'lidar={preview["lidar"]["status"]}'
+                )
+            )
         self.get_logger().info(
             f'Calibration capture: matched={self.matched_count}, '
             f'saved={self.save_count}/{self.total_samples}, '
-            f'rejected={self.rejected_count}, latest_delta={delta_text}'
+            f'rejected={self.rejected_count}, latest_delta={delta_text}, '
+            f'preview={preview_text}'
         )
 
     def _log_complete_once(self):
@@ -711,6 +1151,25 @@ class SensorSyncSaverNode(Node):
         if self._shutdown_started:
             return
         self._shutdown_started = True
+        self._preview_stop_event.set()
+        with self._preview_condition:
+            self._preview_condition.notify_all()
+        if (
+            self._preview_thread is not None
+            and self._preview_thread.is_alive()
+            and threading.current_thread() is not self._preview_thread
+        ):
+            self._preview_thread.join(timeout=3.0)
+            if self._preview_thread.is_alive():
+                self.get_logger().warning(
+                    'Manual preview worker did not stop within three seconds.'
+                )
+        if self._preview_display_enabled:
+            try:
+                cv2.destroyWindow(self._preview_window_name)
+                cv2.waitKey(1)
+            except cv2.error:
+                pass
         try:
             self._write_summary()
         except Exception as error:

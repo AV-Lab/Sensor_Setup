@@ -16,6 +16,9 @@ from scripts.calibration_common import default_config_path
 from scripts.calibration_common import load_calibration_bundle
 from scripts.calibration_common import load_session_pairs
 from scripts.calibration_common import read_pcd
+from scripts.lidar_target_detection import detect_lidar_checkerboard
+from scripts.lidar_target_detection import load_lidar_detection_policy
+from scripts.manual_capture_preview import detect_camera_checkerboard
 
 
 def _positive_number(mapping, key, default):
@@ -55,6 +58,9 @@ def load_audit_policy(bundle):
     quality = bundle.raw.get('quality', {})
     if not isinstance(quality, dict):
         raise CalibrationError('quality must be a mapping.')
+    lidar_detection = load_lidar_detection_policy(
+        bundle.raw.get('lidar_target_detection')
+    )
     return {
         'pattern_size': tuple(inner),
         'square_size_m': square_size,
@@ -82,6 +88,171 @@ def load_audit_policy(bundle):
         'duplicate_normal_angle_deg': _positive_number(
             quality, 'duplicate_normal_angle_deg', 5.0
         ),
+        'lidar_target_detection': lidar_detection,
+    }
+
+
+def _read_json_mapping(path, description):
+    """Read one strict finite JSON object from a capture session."""
+    def reject_nonstandard_constant(value):
+        raise ValueError(f'non-finite JSON value {value}')
+
+    try:
+        with path.open('r', encoding='utf-8') as input_file:
+            document = json.load(
+                input_file,
+                parse_constant=reject_nonstandard_constant,
+            )
+    except (OSError, ValueError) as error:
+        raise CalibrationError(
+            f'Cannot read {description} {path}: {error}'
+        ) from error
+    if not isinstance(document, dict):
+        raise CalibrationError(f'{description} {path} is not a JSON object.')
+    return document
+
+
+def verify_session_provenance(session, bundle):
+    """Verify archived active intrinsics and sensor metadata when present."""
+    session = Path(session).resolve()
+    session_document_path = session / 'session.json'
+    runtime_name = None
+    if session_document_path.is_file():
+        session_document = _read_json_mapping(
+            session_document_path, 'session metadata'
+        )
+        runtime_name = session_document.get('runtime_metadata_file')
+        if runtime_name is not None and (
+            not isinstance(runtime_name, str) or not runtime_name
+        ):
+            raise CalibrationError(
+                'session.json runtime_metadata_file must be a file name.'
+            )
+
+    runtime_path = session / (runtime_name or 'runtime_metadata.json')
+    runtime_path = runtime_path.resolve()
+    if runtime_path.parent != session:
+        raise CalibrationError(
+            'runtime_metadata_file must name a file inside the session.'
+        )
+    if not runtime_path.is_file():
+        if runtime_name is not None:
+            raise CalibrationError(
+                f'Session declares missing runtime metadata: {runtime_path}'
+            )
+        return {
+            'status': 'legacy_metadata_missing',
+            'runtime_metadata_file': None,
+            'camera_controls_applied_and_verified': None,
+        }
+
+    document = _read_json_mapping(runtime_path, 'runtime metadata')
+    if document.get('schema_version') != 1:
+        raise CalibrationError(
+            f'{runtime_path}: unsupported runtime metadata schema.'
+        )
+    camera_info = document.get('camera_info')
+    camera_publisher = document.get('camera_publisher')
+    lidar_publisher = document.get('lidar_publisher')
+    if not isinstance(camera_info, dict):
+        raise CalibrationError(
+            f'{runtime_path}: camera_info must be an object.'
+        )
+    metadata_complete = document.get(
+        'publisher_metadata_complete',
+        isinstance(camera_publisher, dict)
+        and isinstance(lidar_publisher, dict),
+    )
+    if not isinstance(metadata_complete, bool):
+        raise CalibrationError(
+            f'{runtime_path}: publisher_metadata_complete must be boolean.'
+        )
+    if metadata_complete:
+        if not isinstance(camera_publisher, dict):
+            raise CalibrationError(
+                f'{runtime_path}: camera publisher metadata is missing.'
+            )
+        if not isinstance(lidar_publisher, dict):
+            raise CalibrationError(
+                f'{runtime_path}: LiDAR publisher metadata is missing.'
+            )
+        if camera_publisher.get('publisher') != 'sensors.camera_node':
+            raise CalibrationError(
+                f'{runtime_path}: unexpected camera publisher identity.'
+            )
+        if lidar_publisher.get('publisher') != 'sensors.ouster_node':
+            raise CalibrationError(
+                f'{runtime_path}: unexpected LiDAR publisher identity.'
+            )
+
+    try:
+        archived_matrix = np.asarray(
+            camera_info['k'], dtype=np.float64
+        ).reshape(3, 3)
+        archived_distortion = np.asarray(
+            camera_info['d'], dtype=np.float64
+        ).reshape(-1)
+        archived_width = int(camera_info['width'])
+        archived_height = int(camera_info['height'])
+    except (KeyError, TypeError, ValueError) as error:
+        raise CalibrationError(
+            f'{runtime_path}: invalid archived CameraInfo.'
+        ) from error
+    if not np.isfinite(archived_matrix).all() or not np.isfinite(
+        archived_distortion
+    ).all():
+        raise CalibrationError(
+            f'{runtime_path}: archived CameraInfo contains non-finite values.'
+        )
+    camera_matches = (
+        archived_width == bundle.camera.width
+        and archived_height == bundle.camera.height
+        and camera_info.get('distortion_model')
+        == bundle.camera.distortion_model
+        and archived_distortion.shape == bundle.camera.distortion.shape
+        and np.allclose(archived_matrix, bundle.camera.matrix, atol=1e-9)
+        and np.allclose(
+            archived_distortion, bundle.camera.distortion, atol=1e-9
+        )
+    )
+    if not camera_matches:
+        raise CalibrationError(
+            'Archived CameraInfo does not match the camera intrinsics loaded '
+            f'from {bundle.camera.source_path}.'
+        )
+    if camera_info.get('frame_id') != bundle.extrinsic.target_frame:
+        raise CalibrationError(
+            'Archived CameraInfo frame does not match extrinsic.target_frame.'
+        )
+    if metadata_complete:
+        lidar_policy = lidar_publisher.get('ros_policy')
+        if (
+            not isinstance(lidar_policy, dict)
+            or lidar_policy.get('frame_id') != bundle.extrinsic.source_frame
+        ):
+            raise CalibrationError(
+                'Archived LiDAR frame does not match '
+                'extrinsic.source_frame.'
+            )
+
+    camera_device = (
+        camera_publisher.get('camera')
+        if isinstance(camera_publisher, dict)
+        else None
+    )
+    controls_verified = None
+    if metadata_complete and isinstance(camera_device, dict):
+        controls_verified = camera_device.get(
+            'applied_standard_controls_verified'
+        )
+    return {
+        'status': (
+            'verified'
+            if metadata_complete
+            else 'publisher_metadata_incomplete'
+        ),
+        'runtime_metadata_file': str(runtime_path.relative_to(session)),
+        'camera_controls_applied_and_verified': controls_verified,
     }
 
 
@@ -92,35 +263,6 @@ def checkerboard_object_points(pattern_size, square_size_m):
     grid[:, :2] = np.mgrid[0:columns, 0:rows].T.reshape(-1, 2)
     grid[:, :2] *= square_size_m
     return grid
-
-
-def _detect_checkerboard(gray, pattern_size):
-    """Use the robust SB detector, with a classic OpenCV fallback."""
-    sb_flags = (
-        cv2.CALIB_CB_NORMALIZE_IMAGE
-        | cv2.CALIB_CB_EXHAUSTIVE
-        | cv2.CALIB_CB_ACCURACY
-    )
-    detected, corners = cv2.findChessboardCornersSB(
-        gray, pattern_size, flags=sb_flags
-    )
-    if detected:
-        return True, corners.reshape(-1, 2), 'findChessboardCornersSB'
-
-    classic_flags = cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_NORMALIZE_IMAGE
-    detected, corners = cv2.findChessboardCorners(
-        gray, pattern_size, flags=classic_flags
-    )
-    if not detected:
-        return False, None, 'not_detected'
-    refined = cv2.cornerSubPix(
-        gray,
-        corners,
-        (11, 11),
-        (-1, -1),
-        (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001),
-    )
-    return True, refined.reshape(-1, 2), 'findChessboardCorners'
 
 
 def _checkerboard_crop(gray, corners):
@@ -145,7 +287,7 @@ def analyze_image(image, camera, policy):
             f'{camera.width}x{camera.height} from camera intrinsics.'
         )
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    detected, corners, detector = _detect_checkerboard(
+    detected, corners, detector = detect_camera_checkerboard(
         gray, policy['pattern_size']
     )
     crop = _checkerboard_crop(gray, corners)
@@ -210,21 +352,49 @@ def analyze_image(image, camera, policy):
     return result, corners
 
 
-def analyze_cloud(path):
-    """Verify PCD structure and summarize its actual valid XYZ content."""
+def analyze_cloud(path, target=None, detection_policy=None):
+    """Verify PCD structure and optionally screen for a LiDAR target."""
     header, cloud = read_pcd(path)
     xyz = np.column_stack((cloud['x'], cloud['y'], cloud['z']))
     finite = np.isfinite(xyz).all(axis=1)
     nonzero = np.square(xyz).sum(axis=1) > 0.0
     valid = finite & nonzero
+    fields = list(header.get('FIELDS') or header.get('FIELD'))
+    value_field = next(
+        (name for name in ('reflectivity', 'intensity', 'signal') if name in fields),
+        None,
+    )
+    if target is None or detection_policy is None:
+        detection = {
+            'status': 'unavailable',
+            'value_field': value_field,
+            'reason': 'target geometry or detection policy was not supplied',
+            'requires_manual_confirmation': True,
+            'candidate': None,
+        }
+    elif value_field is None:
+        detection = {
+            'status': 'unavailable',
+            'value_field': None,
+            'reason': 'PCD has no reflectivity, intensity, or signal field',
+            'requires_manual_confirmation': True,
+            'candidate': None,
+        }
+    else:
+        detection = detect_lidar_checkerboard(
+            xyz,
+            cloud[value_field],
+            target,
+            detection_policy,
+            value_field,
+        )
     return {
         'pcd_data_kind': header['DATA'][0].lower(),
-        'pcd_fields': list(header.get('FIELDS') or header.get('FIELD')),
+        'pcd_fields': fields,
         'actual_point_count': int(len(cloud)),
         'valid_xyz_count': int(np.count_nonzero(valid)),
         'valid_xyz_fraction': float(np.mean(valid)) if len(cloud) else 0.0,
-        # General cloud checks cannot prove that the calibration target is hit.
-        'lidar_target_detection': 'not_verified',
+        'lidar_target_detection': detection,
     }
 
 
@@ -253,8 +423,17 @@ def _pair_reasons(pair, image_result, cloud_result, bundle, policy):
     fraction = image_result['board_image_fraction']
     if fraction is not None and fraction < policy['min_board_image_fraction']:
         warnings.append('checkerboard_is_small_in_image')
-    if cloud_result['lidar_target_detection'] != 'verified':
-        warnings.append('lidar_board_presence_not_automatically_verified')
+    detection = cloud_result['lidar_target_detection']
+    if detection['status'] != 'candidate':
+        reason = 'lidar_checkerboard_candidate_not_detected'
+        if policy['lidar_target_detection']['required']:
+            failures.append(reason)
+        else:
+            warnings.append(reason)
+    else:
+        warnings.append(
+            'lidar_checkerboard_candidate_requires_manual_confirmation'
+        )
     return failures, warnings
 
 
@@ -333,7 +512,13 @@ def _write_json_atomic(path, document):
     )
     try:
         with temporary.open('x', encoding='utf-8') as output:
-            json.dump(document, output, indent=2, sort_keys=True)
+            json.dump(
+                document,
+                output,
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            )
             output.write('\n')
             output.flush()
             os.fsync(output.fileno())
@@ -345,6 +530,7 @@ def _write_json_atomic(path, document):
 def audit_session(bundle, session, pairs, write_overlays=False):
     """Analyze every manifest pair and return an auditable report."""
     policy = load_audit_policy(bundle)
+    provenance = verify_session_provenance(session, bundle)
     pair_results = []
     overlay_directory = session / 'quality_overlays'
     if write_overlays:
@@ -355,7 +541,11 @@ def audit_session(bundle, session, pairs, write_overlays=False):
         if image is None:
             raise CalibrationError(f'Cannot decode {pair["image_path"]}.')
         image_result, corners = analyze_image(image, bundle.camera, policy)
-        cloud_result = analyze_cloud(pair['pointcloud_path'])
+        cloud_result = analyze_cloud(
+            pair['pointcloud_path'],
+            bundle.raw['target'],
+            policy['lidar_target_detection'],
+        )
         failures, warnings = _pair_reasons(
             pair, image_result, cloud_result, bundle, policy
         )
@@ -421,9 +611,9 @@ def audit_session(bundle, session, pairs, write_overlays=False):
         'board_center_normalized_range': None,
         'board_normal_max_separation_deg': None,
         'important_limitation': (
-            'Candidate usable means image target, timing, frames, and general '
-            'cloud structure passed. It does not prove the checkerboard was '
-            'hit or isolated in the LiDAR cloud.'
+            'LiDAR target detection is a geometric and reflectivity-pattern '
+            'candidate screen, not proof of target identity. Confirm the '
+            'selected plane visually or in the calibration solver.'
         ),
     }
     if translations:
@@ -461,6 +651,7 @@ def audit_session(bundle, session, pairs, write_overlays=False):
         'camera_config': str(bundle.camera.source_path),
         'target': bundle.raw['target'],
         'policy': policy,
+        'runtime_provenance': provenance,
         'summary': summary,
         'pairs': pair_results,
     }

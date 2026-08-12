@@ -11,6 +11,7 @@ import yaml
 from scripts.calibration_audit import analyze_image
 from scripts.calibration_audit import audit_session
 from scripts.calibration_audit import load_audit_policy
+from scripts.calibration_audit import verify_session_provenance
 from scripts.calibration_common import CalibrationError
 from scripts.calibration_common import load_calibration_bundle
 from scripts.calibration_common import load_session_pairs
@@ -20,6 +21,11 @@ from scripts.calibration_common import read_pcd
 from scripts.calibration_tf_publisher import source_parent_transform
 from scripts.camera_configuration import validate_camera_config
 from scripts.interactive_calibration import apply_refinement
+from scripts.lidar_target_detection import detect_lidar_checkerboard
+from scripts.lidar_target_detection import load_lidar_detection_policy
+from scripts.manual_capture_preview import evaluate_manual_preview
+from scripts.manual_capture_preview import load_preview_contract
+from scripts.manual_capture_preview import render_manual_preview
 
 
 def _write_yaml(path, document):
@@ -231,6 +237,166 @@ def test_image_audit_detects_checkerboard_and_pose(tmp_path):
     assert result['board_reprojection_rmse_px'] < 1.0
 
 
+def _synthetic_lidar_checkerboard(uniform=False):
+    """Return a dense planar 9x7-square reflectivity target."""
+    random_generator = np.random.default_rng(4)
+    square_size = 0.04
+    points = []
+    reflectivity = []
+    for column in range(9):
+        for row in range(7):
+            for u in np.linspace(0.05, 0.95, 4):
+                for v in np.linspace(0.05, 0.95, 4):
+                    points.append([
+                        (column + u) * square_size - 0.18,
+                        (row + v) * square_size - 0.14,
+                        3.0 + random_generator.normal(0.0, 0.001),
+                    ])
+                    value = 100.0
+                    if not uniform:
+                        value = 220.0 if (column + row) % 2 else 20.0
+                    reflectivity.append(value)
+    return np.asarray(points), np.asarray(reflectivity)
+
+
+def test_lidar_detector_finds_checkerboard_like_candidate():
+    """Expected plane dimensions plus alternating reflectivity are screened."""
+    target = _calibration_document()['target']
+    policy = load_lidar_detection_policy({'enabled': True})
+    points, reflectivity = _synthetic_lidar_checkerboard()
+
+    result = detect_lidar_checkerboard(
+        points, reflectivity, target, policy, 'reflectivity'
+    )
+
+    assert result['status'] == 'candidate'
+    assert result['requires_manual_confirmation'] is True
+    assert result['candidate']['passes_thresholds'] is True
+    assert result['candidate']['checker_classification_accuracy'] > 0.9
+
+
+def test_lidar_detector_rejects_uniform_planar_patch():
+    """Plane shape alone is not enough to claim a target candidate."""
+    target = _calibration_document()['target']
+    policy = load_lidar_detection_policy({'enabled': True})
+    points, reflectivity = _synthetic_lidar_checkerboard(uniform=True)
+
+    result = detect_lidar_checkerboard(
+        points, reflectivity, target, policy, 'reflectivity'
+    )
+
+    assert result['status'] == 'not_detected'
+
+
+def test_manual_preview_renders_both_detection_results():
+    """Manual preview clearly reports when both synthetic targets are found."""
+    target = _calibration_document()['target']
+    policy = load_lidar_detection_policy({'enabled': True})
+    xyz, reflectivity = _synthetic_lidar_checkerboard()
+    points = np.column_stack((xyz, reflectivity)).astype(np.float32)
+    image = _checkerboard_image()
+
+    result, corners = evaluate_manual_preview(
+        image,
+        points,
+        'reflectivity',
+        target,
+        policy,
+        3.5,
+    )
+    preview = render_manual_preview(
+        image, points, result, corners, target, policy
+    )
+
+    assert result['ready'] is True
+    assert result['advisory_only'] is True
+    assert result['camera_corner_count'] == 48
+    assert result['lidar']['status'] == 'candidate'
+    assert preview.shape == (544, 1280, 3)
+
+
+def test_preview_contract_uses_calibration_target_source(tmp_path):
+    """Preview target dimensions come from calibrate.yaml, not a duplicate."""
+    document = _calibration_document()
+    document['lidar_target_detection'] = {'enabled': True}
+    path = tmp_path / 'calibrate.yaml'
+    _write_yaml(path, document)
+
+    target, policy = load_preview_contract(path)
+
+    assert target == document['target']
+    assert policy['enabled'] is True
+
+
+def _runtime_provenance_document():
+    """Return runtime metadata matching the synthetic camera bundle."""
+    return {
+        'schema_version': 1,
+        'publisher_metadata_complete': True,
+        'camera_info': {
+            'frame_id': 'camera_optical_frame',
+            'width': 640,
+            'height': 480,
+            'distortion_model': 'plumb_bob',
+            'd': [0.0, 0.0, 0.0, 0.0, 0.0],
+            'k': [
+                500.0, 0.0, 320.0,
+                0.0, 500.0, 240.0,
+                0.0, 0.0, 1.0,
+            ],
+        },
+        'camera_publisher': {
+            'publisher': 'sensors.camera_node',
+            'camera': {'applied_standard_controls_verified': True},
+        },
+        'lidar_publisher': {
+            'publisher': 'sensors.ouster_node',
+            'ros_policy': {'frame_id': 'os_sensor'},
+        },
+    }
+
+
+def test_session_provenance_must_match_loaded_intrinsics(tmp_path):
+    """Audit cannot silently use a camera model different from capture."""
+    bundle = load_calibration_bundle(_write_bundle(tmp_path))
+    session = tmp_path / 'session'
+    session.mkdir()
+    (session / 'session.json').write_text(
+        json.dumps({'runtime_metadata_file': 'runtime_metadata.json'}),
+        encoding='utf-8',
+    )
+    runtime_path = session / 'runtime_metadata.json'
+    runtime = _runtime_provenance_document()
+    runtime_path.write_text(json.dumps(runtime), encoding='utf-8')
+
+    result = verify_session_provenance(session, bundle)
+
+    assert result['status'] == 'verified'
+    assert result['camera_controls_applied_and_verified'] is True
+    runtime['camera_info']['k'][0] = 700.0
+    runtime_path.write_text(json.dumps(runtime), encoding='utf-8')
+    with pytest.raises(CalibrationError, match='does not match'):
+        verify_session_provenance(session, bundle)
+
+
+def test_session_provenance_reports_allowed_legacy_publishers(tmp_path):
+    """An explicitly incomplete archive remains auditable but not verified."""
+    bundle = load_calibration_bundle(_write_bundle(tmp_path))
+    session = tmp_path / 'legacy_session'
+    session.mkdir()
+    runtime = _runtime_provenance_document()
+    runtime['publisher_metadata_complete'] = False
+    runtime['camera_publisher'] = None
+    runtime['lidar_publisher'] = None
+    (session / 'runtime_metadata.json').write_text(
+        json.dumps(runtime), encoding='utf-8'
+    )
+
+    result = verify_session_provenance(session, bundle)
+
+    assert result['status'] == 'publisher_metadata_incomplete'
+
+
 def test_session_audit_uses_manifest_and_reports_limitation(tmp_path):
     """A complete synthetic session produces an honest quality report."""
     calibration_path = _write_bundle(tmp_path, valid=False)
@@ -265,4 +431,5 @@ def test_session_audit_uses_manifest_and_reports_limitation(tmp_path):
     assert report['summary']['checkerboard_detected_count'] == 1
     assert report['summary']['candidate_usable_count'] == 1
     assert report['pairs'][0]['cloud']['actual_point_count'] == 1200
-    assert 'does not prove' in report['summary']['important_limitation']
+    assert report['runtime_provenance']['status'] == 'legacy_metadata_missing'
+    assert 'not proof' in report['summary']['important_limitation']

@@ -38,6 +38,8 @@ ROS:
   # image_proc or a separate node.
   topic_name: "/camera/image_raw"
   camera_info_topic: "/camera/camera_info"
+  # Durable JSON containing resolved device, active mode, and control readback.
+  runtime_metadata_topic: "/camera/runtime_metadata"
   frame_id: "camera_optical_frame"
 
 qos:

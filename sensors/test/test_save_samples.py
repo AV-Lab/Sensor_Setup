@@ -5,17 +5,20 @@ import json
 import cv2
 import numpy as np
 import pytest
-from sensor_msgs.msg import Image, PointField
+from sensor_msgs.msg import CameraInfo, Image, PointField
 from sensor_msgs_py import point_cloud2
-from std_msgs.msg import Header
+from std_msgs.msg import Header, String
 
 from scripts.save_samples import (
     CaptureSession,
+    camera_info_message_to_document,
+    decode_runtime_metadata,
     image_message_to_bgr,
     make_binary_pcd,
     pointcloud_message_to_array,
     validate_save_config,
 )
+from scripts.v4l2_camera import control_readback_matches
 
 
 def _cloud(fields, points):
@@ -39,7 +42,10 @@ def _valid_config(tmp_path):
     return {
         'ROS': {
             'image_topic_name': '/image',
+            'camera_info_topic_name': '/camera_info',
             'pointcloud_topic_name': '/points',
+            'camera_runtime_metadata_topic': '/camera/runtime_metadata',
+            'lidar_runtime_metadata_topic': '/lidar/runtime_metadata',
             'save_service_name': '/save',
         },
         'Sync': {'threshold_sec': 0.025, 'queue_size': 10},
@@ -50,8 +56,17 @@ def _valid_config(tmp_path):
             'max_pair_age_sec': 0.25,
             'min_point_count': 1,
             'diagnostics_interval_sec': 5.0,
+            'require_runtime_metadata': True,
+            'require_calibrated_camera_info': True,
             'output_root': str(tmp_path),
             'session_name': 'test_session',
+        },
+        'ManualPreview': {
+            'enabled': True,
+            'display': False,
+            'analysis_interval_sec': 0.5,
+            'calibration_config': 'calibrate.yaml',
+            'window_name': 'test preview',
         },
     }
 
@@ -128,6 +143,64 @@ def test_binary_pcd_preserves_four_float_fields():
     )
 
 
+def test_camera_info_document_preserves_active_projection():
+    """The session provenance retains the exact synchronized CameraInfo."""
+    message = CameraInfo()
+    message.header.stamp.sec = 12
+    message.header.stamp.nanosec = 34
+    message.header.frame_id = 'camera_optical_frame'
+    message.width = 640
+    message.height = 480
+    message.distortion_model = 'plumb_bob'
+    message.d = [0.1, -0.2, 0.0, 0.0, 0.0]
+    message.k = [500.0, 0.0, 320.0, 0.0, 500.0, 240.0, 0.0, 0.0, 1.0]
+    message.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    message.p = [
+        500.0, 0.0, 320.0, 0.0,
+        0.0, 500.0, 240.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+    ]
+
+    document = camera_info_message_to_document(message)
+
+    assert document['stamp_ns'] == 12_000_000_034
+    assert document['frame_id'] == 'camera_optical_frame'
+    assert document['calibrated'] is True
+    assert document['k'] == list(message.k)
+    assert document['p'] == list(message.p)
+
+
+def test_runtime_metadata_must_be_a_json_object():
+    """Malformed durable publisher metadata must fail closed."""
+    valid = String(data='{"schema_version": 1, "device": "test"}')
+    assert decode_runtime_metadata(valid, 'camera')['device'] == 'test'
+
+    with pytest.raises(ValueError, match='JSON object'):
+        decode_runtime_metadata(String(data='[1, 2]'), 'camera')
+    with pytest.raises(ValueError, match='invalid JSON'):
+        decode_runtime_metadata(String(data='{'), 'camera')
+    with pytest.raises(ValueError, match='invalid JSON'):
+        decode_runtime_metadata(String(data='{"value": NaN}'), 'camera')
+
+
+def test_runtime_metadata_verifies_expected_publisher():
+    """A similarly named topic cannot silently provide another node's data."""
+    message = String(data=json.dumps({
+        'schema_version': 1,
+        'publisher': 'unexpected.node',
+    }))
+
+    with pytest.raises(ValueError, match='did not come from'):
+        decode_runtime_metadata(message, 'camera', 'sensors.camera_node')
+
+
+def test_control_readback_comparison_allows_small_backend_quantization():
+    """Control verification accepts small quantization but rejects drift."""
+    assert control_readback_matches(100.0, 101.0)
+    assert not control_readback_matches(100.0, 110.0)
+    assert not control_readback_matches(1.0, float('nan'))
+
+
 @pytest.mark.parametrize(
     ('section', 'key', 'value'),
     [
@@ -185,6 +258,31 @@ def test_capture_session_writes_complete_auditable_pair(tmp_path):
 
     with pytest.raises(FileExistsError):
         session.write_pair(0, image, points, 'reflectivity', metadata)
+
+
+def test_capture_session_archives_immutable_runtime_provenance(tmp_path):
+    """Active sensor metadata is archived once and cannot drift silently."""
+    session = CaptureSession(
+        tmp_path,
+        'metadata_session',
+        {'schema_version': 1},
+    )
+    provenance = {
+        'camera_info': {'k': [500.0]},
+        'camera_publisher': {'device': '/dev/video0'},
+        'lidar_publisher': {'serial': '1234'},
+    }
+
+    session.write_runtime_provenance(provenance)
+    session.write_runtime_provenance(provenance)
+
+    archived = json.loads(
+        session.runtime_metadata_path.read_text(encoding='utf-8')
+    )
+    assert archived == provenance
+    changed = {**provenance, 'lidar_publisher': {'serial': 'different'}}
+    with pytest.raises(ValueError, match='changed during the session'):
+        session.write_runtime_provenance(changed)
 
 
 def test_capture_session_never_reuses_an_existing_name(tmp_path):

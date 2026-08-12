@@ -45,6 +45,16 @@ def validate_camera_config(config):
     camera = config['camera']
     capture = config['capture']
     intrinsics = config['intrinsics']
+    ros = config['ROS']
+
+    for name in (
+        'topic_name',
+        'camera_info_topic',
+        'runtime_metadata_topic',
+        'frame_id',
+    ):
+        if not isinstance(ros.get(name), str) or not ros[name]:
+            raise ValueError(f'ROS.{name} must be a non-empty string.')
 
     device = camera.get('device')
     if isinstance(device, bool) or not isinstance(device, (int, str)):

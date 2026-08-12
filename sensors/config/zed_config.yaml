@@ -6,7 +6,9 @@ camera:
   height: 1080
   width: 1920
   depth_mode: NONE  # Options: NONE, PERFORMANCE, QUALITY, ULTRA
-  timestamp_mode: "System_Time"  # sl.TIME_REFERENCE.IMAGE , sl.TIME_REFERENCE.CURRENT
+  # IMAGE uses the ZED acquisition timestamp, CURRENT uses the ZED clock at
+  # retrieval, and System_Time uses the ROS clock at retrieval.
+  timestamp_mode: "System_Time"
   
   # sl.TIME_REFERENCE.CURRENT: To get the current timestamp at the time of the function call
   # sl.TIME_REFERENCE.IMAGE: To get the timestamp of the last captured image

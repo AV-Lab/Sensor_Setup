@@ -1,13 +1,19 @@
 """Publish unrectified images from the configured V4L2 camera."""
 
+import json
 import threading
 
 import cv2
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import (
+    DurabilityPolicy,
+    HistoryPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+)
 from sensor_msgs.msg import CameraInfo, Image
-from std_msgs.msg import Header
+from std_msgs.msg import Header, String
 
 from .camera_configuration import load_camera_config
 from .camera_diagnostics import CameraDiagnostics
@@ -58,6 +64,17 @@ class CameraPublisher(Node):
             self.config['ROS']['camera_info_topic'],
             qos_profile,
         )
+        metadata_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
+        self.runtime_metadata_publisher = self.create_publisher(
+            String,
+            self.config['ROS']['runtime_metadata_topic'],
+            metadata_qos,
+        )
 
         self._camera = V4L2Camera(
             camera_config=self._camera_config,
@@ -66,6 +83,7 @@ class CameraPublisher(Node):
             logger=self.get_logger(),
         )
         self.camera_info = self._make_camera_info()
+        self._publish_runtime_metadata()
         self._warn_about_host_receipt_timing()
 
         self._health_timer = self.create_timer(0.2, self._check_capture_health)
@@ -149,6 +167,26 @@ class CameraPublisher(Node):
         camera_info.r = [float(value) for value in intrinsics['rectification']]
         camera_info.p = [float(value) for value in intrinsics['projection']]
         return camera_info
+
+    def _publish_runtime_metadata(self):
+        """Publish durable active camera configuration and control readback."""
+        document = {
+            'schema_version': 1,
+            'publisher': 'sensors.camera_node',
+            'frame_id': self.config['ROS']['frame_id'],
+            'timestamp_source': self._timestamp_source,
+            'camera': self._camera.runtime_metadata(),
+            'intrinsics_provenance': self.config['intrinsics'].get(
+                'provenance', {}
+            ),
+        }
+        message = String()
+        message.data = json.dumps(document, sort_keys=True, allow_nan=False)
+        self.runtime_metadata_publisher.publish(message)
+        self.get_logger().info(
+            'Published durable camera runtime metadata on '
+            f'{self.config["ROS"]["runtime_metadata_topic"]}.'
+        )
 
     def _capture_loop(self):
         """Block on camera frames and publish each frame as it arrives."""

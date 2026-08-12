@@ -126,6 +126,8 @@ ros2 run sensors camera_node --ros-args --remap use_sim_time:=false
   one pair
 - Images are saved as `.png`; point clouds are binary `.pcd` files retaining
   `reflectivity` (or the source driver's `intensity` field)
+- The synchronized active `CameraInfo`, Ouster metadata/config readback, and
+  camera mode/control readback are archived with the session
 - Every run creates a non-overwriting session with timestamp/frame metadata
 
 #### Configuration
@@ -133,6 +135,7 @@ ros2 run sensors camera_node --ros-args --remap use_sim_time:=false
 - Configurable parameters include:
   - Synchronization threshold and queue size
   - Manual or non-blocking interval capture
+  - Advisory manual preview rate, display, and calibration contract
   - Minimum interval, fresh-pair age, and valid-point gates
   - Output root and number of calibration poses
 
@@ -145,29 +148,60 @@ ros2 run sensors save_node --ros-args -p use_sim_time:=true
 ros2 run sensors save_node --ros-args -p use_sim_time:=false
 ```
 
-For the recommended manual workflow, wait until both topics are matching, hold
-the target still, and request one fresh pair:
+Start `save_node` before replay. New bags must contain `/camera/camera_info`,
+`/camera/runtime_metadata`, and `/ouster/runtime_metadata` as well as the image
+and cloud. Older bags without those provenance topics fail closed with the
+default configuration; only set `require_runtime_metadata: false` for a
+deliberate legacy-data recovery where incomplete provenance is acceptable.
+
+In manual mode, `save_node` analyzes only the newest synchronized pair on a
+separate worker. Its preview shows:
+
+- Camera image and detected checkerboard corners on the left.
+- The best LiDAR plane in local plane coordinates, colored by reflectivity or
+  intensity, on the right.
+- Camera/LiDAR detection status, synchronization delta, dimensions, plane
+  residual, point count, contrast, and checker-pattern score.
+
+Wait until `READY: BOTH TARGETS FOUND` remains stable, keep the target still,
+and then request one fresh pair:
 
 ```bash
 ros2 service call /calibration_capture/save_pair std_srvs/srv/Trigger "{}"
 ```
+
+The preview is advisory and does not currently gate the service. The saved pair
+is the freshest synchronized pair, so keep the target and sensor platform still
+between seeing `READY` and calling the service. This avoids turning unvalidated
+LiDAR thresholds into an automatic rejection policy. Automatic save-on-both-
+detections is intentionally deferred until real sensor data has established
+acceptable false-positive and false-negative rates.
+
+Preview settings are under `ManualPreview` in `save_sample.yaml`. Detection is
+latest-only and defaults to one analysis every 0.5 seconds, so it cannot create
+a processing backlog. On a headless system, set `display: false`; readiness
+transitions and the current status remain available in the ROS logs.
 
 Repeat for each distinct board pose. The default target is 40 poses. Output is
 written under:
 
 ```text
 calibration_data/session_<UTC>/
-├── session.json       # saver plus requested sensor configurations
-├── manifest.jsonl     # one timestamp/frame/field record per complete pair
-├── summary.json       # matched, saved, rejected, and completion counters
+├── session.json          # saver plus requested sensor configurations
+├── runtime_metadata.json # active CameraInfo and sensor/publisher readback
+├── manifest.jsonl        # one timestamp/frame/field record per complete pair
+├── summary.json          # matched, saved, rejected, and completion counters
 ├── images/img_0000.png
 └── pcds/pc_0000.pcd
 ```
 
 The service succeeds only after both files and the manifest record are written.
 It refuses stale, duplicate, too-close, wrong-frame, undersized, and malformed
-pairs. For each pose, vary board position, distance, yaw, pitch, and roll; many
-nearly identical frames do not improve calibration.
+pairs. By default it also refuses uncalibrated `CameraInfo` or missing durable
+runtime metadata. If active intrinsics or device metadata changes during a
+session, the next save is rejected instead of silently mixing configurations.
+For each pose, vary board position, distance, yaw, pitch, and roll; many nearly
+identical frames do not improve calibration.
 
 Audit the completed session before moving it to another machine:
 
@@ -178,12 +212,13 @@ ros2 run sensors calibration_audit \
 ```
 
 The report checks manifest integrity, synchronization, frame IDs, PCD validity,
-checkerboard detection, image sharpness/exposure, board coverage, estimated
-camera-frame board pose, and possible duplicate poses. It writes
-`quality_report.json` and, when requested, `quality_overlays/` inside the
-session. A passing result does not claim that the same board was automatically
-isolated in the LiDAR cloud; inspect that in the calibration solver or add a
-verified target-specific LiDAR selection stage.
+camera checkerboard detection, image sharpness/exposure, board coverage,
+estimated camera-frame board pose, possible duplicate poses, and a conservative
+LiDAR checkerboard-candidate screen. The LiDAR screen looks for a planar patch
+with the target's physical dimensions and an alternating reflectivity-like
+pattern. It writes `quality_report.json` and, when requested,
+`quality_overlays/` inside the session. A candidate is not proof of target
+identity: inspect the selected plane in the calibration solver before using it.
 
 ⚠️ **Note**: Refer to [Working with ROS2 Bags](#-working-with-ros2-bags) section for detailed guidance on when and how to use `use_sim_time`.
 
@@ -288,7 +323,13 @@ ros2 run sensors camera_node --ros-args -p use_sim_time:=false
 ```
 
 The camera publisher automatically selects the single matching See3CAM under
-`/dev/v4l/by-id`. Verify the final mode in its startup log.
+`/dev/v4l/by-id`. Verify the final mode in its startup log and inspect the
+durable active-device record:
+
+```bash
+ros2 topic echo /camera/runtime_metadata --qos-durability transient_local \
+  --qos-reliability reliable --once
+```
 
 ### Step 3: Calibrate and install camera intrinsics
 
@@ -298,11 +339,34 @@ inner corners and measured square size:
 ```bash
 source install/setup.bash
 ros2 run camera_calibration cameracalibrator \
+  --no-service-check \
+  --camera_name see3cam_24cug \
   --size 8x6 \
   --square 0.108 \
-  image:=/camera/image_raw \
-  camera:=/camera/camera_info
+  --ros-args --remap image:=/camera/image_raw
 ```
+
+`camera_node` publishes `CameraInfo` but intentionally does not implement the
+`SetCameraInfo` service, because this repository keeps intrinsics in
+`camera_config.yaml`. `--no-service-check` prevents the calibrator from waiting
+for a service that is not used by this workflow.
+
+After clicking **CALIBRATE**, click **SAVE**. ROS 2 Humble writes the result to:
+
+```text
+/tmp/calibrationdata.tar.gz
+```
+
+Extract and retain it with the calibration records:
+
+```bash
+mkdir -p camera_calibration_result
+tar -xzf /tmp/calibrationdata.tar.gz -C camera_calibration_result
+```
+
+The monocular result is `camera_calibration_result/ost.yaml`. It contains the
+camera matrix, distortion coefficients, rectification matrix, and projection
+matrix that must be copied into `camera_config.yaml`.
 
 Replace the placeholder arrays in `camera_config.yaml` with the calibration
 result: `distortion`, `camera_matrix_K`, `rectification`, and `projection`.
@@ -367,6 +431,10 @@ ros2 topic hz /camera/image_raw
 ros2 topic hz /lidar_points
 ros2 topic echo /camera/camera_info --once
 ros2 topic echo /lidar_points --field header --once
+ros2 topic echo /camera/runtime_metadata --qos-durability transient_local \
+  --qos-reliability reliable --once
+ros2 topic echo /ouster/runtime_metadata --qos-durability transient_local \
+  --qos-reliability reliable --once
 ```
 
 Expected defaults are approximately 20 Hz for both topics, image frame
@@ -392,7 +460,8 @@ For every target pose:
 2. Make sure the full checkerboard is visible in the camera.
 3. Make sure the board surface is inside the LiDAR field of view.
 4. Hold the board and sensor platform still for several frames.
-5. Request exactly one fresh pair:
+5. Wait for the side-by-side preview to show both camera and LiDAR detections.
+6. Request exactly one fresh pair:
 
 ```bash
 ros2 service call /calibration_capture/save_pair \
@@ -427,10 +496,15 @@ Inspect `quality_report.json` and `quality_overlays/`. Before solving, require:
 - Low duplicate-pose count.
 - Board centers distributed across the image.
 - Multiple distances and clearly different plane normals.
+- A plausible LiDAR `candidate` with its center, normal, dimensions, plane
+  residual, reflectivity contrast, and checker-pattern score reviewed against
+  the cloud.
 
-`candidate_usable` does not prove that the board was hit in the LiDAR cloud.
-It means the image target, timing, frames, and general cloud passed. The board
-plane still must be isolated and visually verified in the extrinsic solver.
+`candidate_usable` and LiDAR status `candidate` do not prove target identity.
+They are screening results. The board plane still must be visually verified in
+the extrinsic solver. Keep `lidar_target_detection.required: false` until the
+thresholds have been tested on data from the final board, range, and Ouster
+mode; only then make a missing candidate a hard audit failure.
 
 ### Step 8: Solve the LiDAR-camera extrinsic
 
@@ -601,23 +675,28 @@ rectification: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
 #### 🤖 ROS2 Based Calibration
 ```bash
 # Install ROS calibration package
-sudo apt-get install ros-$ROS-camera-calibration
+sudo apt-get install ros-$ROS_DISTRO-camera-calibration
 
 # Run calibration node for monocular camera
-ros2 run camera_calibration cameracalibrator --size 8x6 --square 0.108 image:=/camera/image_raw camera:=/camera/camera_info
+ros2 run camera_calibration cameracalibrator \
+  --no-service-check \
+  --camera_name see3cam_24cug \
+  --size 8x6 \
+  --square 0.108 \
+  --ros-args --remap image:=/camera/image_raw
 
 # Parameters:
 # --size: Number of inner corners (width x height)
 # --square: Size of each square in meters
 # /camera/image_raw: Raw image topic
-# /camera/camera_info: Camera info topic 
+# --no-service-check: install the saved result in camera_config.yaml manually
 ```
 
 Follow calibration steps:
 - Move checkerboard to fill calibration bars
 - Click CALIBRATE when ready
 - Click SAVE after successful calibration
-- Find results in ~/.ros/camera_info/
+- Extract `/tmp/calibrationdata.tar.gz`; the monocular result is `ost.yaml`
 
 #### 📐 MATLAB Based Calibration
 ```matlab
@@ -686,6 +765,15 @@ ros2 run sensors node_to_run --ros-args -p use_sim_time:=false
 ros2 bag record -a -o my_rosbag
 ```
 
+When recording an explicit topic list instead of `-a`, include all five data
+and provenance topics:
+
+```bash
+ros2 bag record -o my_rosbag \
+  /camera/image_raw /camera/camera_info /camera/runtime_metadata \
+  /lidar_points /ouster/runtime_metadata
+```
+
 ### Playback
 
 1. Set simulation time:
@@ -713,4 +801,4 @@ ros2 bag play my_rosbag --clock 100
 ---
 For issues or feature requests, please [open an issue](https://github.com/AV-Lab/Sensor_Setup/issues) on our GitHub repository.
 
-```v4l2-ctl --list-devices```
+This repository is licensed under the [Apache License 2.0](LICENSE).

@@ -18,14 +18,16 @@ setup(
         # Install all Python launch descriptions.
         (os.path.join('share', package_name, 'launch'), glob('launch/*.py')),
 
-        ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name, ['package.xml', '../LICENSE']),
     ],
     install_requires=['setuptools'],
+    # ROS Humble's launch_testing plugin still uses the pre-pytest-8 hooks.
+    extras_require={'test': ['pytest<8']},
     zip_safe=True,
     maintainer='avlab_mz',
     maintainer_email='muradsmebrahtu@gmail.com',
     description='ROS2 Ouster/See3CAM capture and calibration utilities',
-    license='TODO: License declaration',
+    license='Apache-2.0',
     entry_points={
         'console_scripts': [
             'clock_node = scripts.clock:main',

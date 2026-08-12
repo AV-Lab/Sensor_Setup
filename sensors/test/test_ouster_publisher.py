@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 from ouster.sdk import core
 import pytest
+from std_msgs.msg import Header
 
 from scripts import ouster_publisher
 from scripts.ouster_publisher import (
@@ -13,10 +14,13 @@ from scripts.ouster_publisher import (
     _configured_bool,
     _configured_enum,
     _configured_float,
+    dropped_scan_count,
     evaluate_ptp_lock,
     evaluate_ptp_timebase,
+    make_xyzi_cloud,
     ptp_timestamp_to_ros_ns,
     scan_midpoint_ns,
+    sensor_config_document,
     valid_column_ratio,
 )
 
@@ -140,6 +144,51 @@ def test_ptp_timestamp_conversion_rejects_wrong_epoch():
 def test_valid_column_ratio_counts_sensor_status_bits():
     """Partial scans are measured before expensive XYZ conversion."""
     assert valid_column_ratio([True, True, False, True]) == 0.75
+
+
+def test_dropped_scan_count_uses_sdk_property():
+    """SDK 0.15.1 exposes dropped_scans as a property, not a method."""
+    stream = SimpleNamespace(dropped_scans=7)
+
+    assert dropped_scan_count(stream) == 7
+
+
+def test_active_sensor_config_is_json_serializable():
+    """Runtime metadata must retain active modes without pybind objects."""
+    config = SimpleNamespace(
+        lidar_mode=core.LidarMode.MODE_1024x20,
+        timestamp_mode=core.TimestampMode.TIME_FROM_PTP_1588,
+        azimuth_window=(0, 360000),
+    )
+
+    document = sensor_config_document(config)
+
+    assert document['lidar_mode'] == '1024x20'
+    assert document['timestamp_mode'] == 'TIME_FROM_PTP_1588'
+    assert document['azimuth_window'] == [0, 360000]
+
+
+def test_xyzi_cloud_uses_direct_contiguous_float_layout():
+    """PointCloud2 bytes must match the declared four-float field layout."""
+    header = Header()
+    header.frame_id = 'os_sensor'
+    points = np.array(
+        [[1.0, 2.0, 3.0, 40.0], [4.0, 5.0, 6.0, 80.0]],
+        dtype=np.float32,
+    )
+
+    message = make_xyzi_cloud(header, points)
+
+    assert message.width == 2
+    assert message.height == 1
+    assert message.point_step == 16
+    assert message.row_step == 32
+    assert [field.name for field in message.fields] == [
+        'x', 'y', 'z', 'reflectivity'
+    ]
+    np.testing.assert_array_equal(
+        np.frombuffer(message.data, dtype='<f4').reshape(-1, 4), points
+    )
 
 
 def test_evaluate_ptp_lock_accepts_a_disciplined_slave():

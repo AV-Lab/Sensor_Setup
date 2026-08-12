@@ -42,6 +42,8 @@ lidar:
 
 ROS:
   topic_name: "/lidar_points"
+  # Durable JSON with SensorInfo and the configuration read back as active.
+  runtime_metadata_topic: "/ouster/runtime_metadata"
 
 qos:
   reliability: BEST_EFFORT

@@ -1,154 +1,175 @@
+"""Publish unrectified images from the legacy optional ZED camera path."""
+
+import os
+
+from ament_index_python.packages import get_package_share_directory
+import cv2
+import numpy as np
+import pyzed.sl as sl
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import Image,CameraInfo
-from cv_bridge import CvBridge
-import pyzed.sl as sl
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.time import Time
+from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Header
-import cv2
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 import yaml
-import os
-from ament_index_python.packages import get_package_share_directory
-import numpy as np
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSDurabilityPolicy, QoSHistoryPolicy
-from rclpy.qos import QoSLivelinessPolicy
+
+
+ZED_TIMESTAMP_SOURCES = {
+    'IMAGE': sl.TIME_REFERENCE.IMAGE,
+    'CURRENT': sl.TIME_REFERENCE.CURRENT,
+    'System_Time': None,
+}
+
 
 class ZEDCameraPublisher(Node):
+    """Publish the ZED left image using the legacy monocular configuration."""
+
     def __init__(self):
+        """Load configuration, open the ZED, and create ROS publishers."""
         super().__init__('zed_camera_publisher')
-
-        # Now we can safely get and use the parameter
-        use_sim_time = self.get_parameter('use_sim_time').get_parameter_value().bool_value
+        use_sim_time = self.get_parameter(
+            'use_sim_time'
+        ).get_parameter_value().bool_value
         self.get_logger().info(f'use_sim_time is set to: {use_sim_time}')
-        
-        # Load configuration
-        config_path = self.load_yaml_file()
-        with open(config_path, 'r') as config_file:
-            self.config = yaml.safe_load(config_file)
-        
-        self.timestamp = self.config['camera']['timestamp_mode']
-        
-        self.camera_info = CameraInfo()
-        self.get_camera_info()
-        self.camera_k = np.array(self.config['intrinsics']['camera_matrix_K']).reshape(-1,3)
-        self.camera_distortion =  np.array(self.config['intrinsics']['distortion'])
 
-        self.zed = sl.Camera()
-        self.bridge = CvBridge()
+        self.config = self._load_config()
+        timestamp_name = self.config['camera']['timestamp_mode']
+        if timestamp_name not in ZED_TIMESTAMP_SOURCES:
+            supported = ', '.join(ZED_TIMESTAMP_SOURCES)
+            raise ValueError(
+                f'Unsupported ZED timestamp_mode {timestamp_name!r}; '
+                f'supported values: {supported}.'
+            )
+        self._timestamp_source = ZED_TIMESTAMP_SOURCES[timestamp_name]
+        self._zed = sl.Camera()
 
-        # Initialize camera
         init_params = sl.InitParameters()
-        init_params.set_from_camera_id(self.config['camera']['id'])
-        init_params.camera_fps = self.config['camera']['fps']
-        init_params.camera_resolution = getattr(sl.RESOLUTION, self.config['camera']['resolution'])
-        init_params.depth_mode = getattr(sl.DEPTH_MODE, self.config['camera']['depth_mode'])
-
-        # Open the ZED camera
-        status = self.zed.open(init_params)
+        init_params.set_from_camera_id(int(self.config['camera']['id']))
+        init_params.camera_fps = int(self.config['camera']['fps'])
+        init_params.camera_resolution = getattr(
+            sl.RESOLUTION, self.config['camera']['resolution']
+        )
+        init_params.depth_mode = getattr(
+            sl.DEPTH_MODE, self.config['camera']['depth_mode']
+        )
+        status = self._zed.open(init_params)
         if status != sl.ERROR_CODE.SUCCESS:
-            self.get_logger().error(f"Error opening ZED: {status}")
-            exit(1)
+            raise RuntimeError(f'Error opening ZED: {status}')
 
-        # QoS profile
-        qos_profile = QoSProfile(
-            reliability=getattr(ReliabilityPolicy, self.config['qos']['reliability']),
-            history=getattr(HistoryPolicy, self.config['qos']['history']),
-            depth=self.config['qos']['depth']
+        qos = self._make_qos_profile()
+        self._image_publisher = self.create_publisher(
+            Image, self.config['ROS']['topic_name'], qos
         )
-        
-
-        # Publisher for ROS2 image topic
-        self.image_publisher = self.create_publisher(
-            Image, 
-            self.config['ROS']['topic_name'], 
-            qos_profile
+        self._camera_info_publisher = self.create_publisher(
+            CameraInfo, self.config['ROS']['camera_info_topic'], qos
         )
-        self.camera_info_publisher = self.create_publisher(CameraInfo, self.config['ROS']['camera_info_topic'], 2)
-        
-        self.create_timer(1.0 /  self.config['camera']['fps'], self.publish_image)
-        
-        # self.publish_image()
-    
-    def load_yaml_file(self):
-        # Get the directory of the package's shared files
-        package_share_directory = get_package_share_directory('sensors')
-        
-        # Construct the path to 'zed_config.yaml' in the 'config' directory
-        config_file_path = os.path.join(package_share_directory, 'config', 'zed_config.yaml')
-        
-        return config_file_path
-    
-    def publish_image(self):
-        image = sl.Mat()
-        if self.zed.grab() == sl.ERROR_CODE.SUCCESS:
-            self.zed.retrieve_image(image, sl.VIEW.LEFT)
-            frame = image.get_data()
+        self._camera_info = self._make_camera_info()
+        self._image = sl.Mat()
+        self._timer = self.create_timer(
+            1.0 / float(self.config['camera']['fps']), self._publish_image
+        )
 
-            if frame.shape[2] == 4:
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB)
-            else:
-                frame_rgb = frame
+    @staticmethod
+    def _config_path():
+        """Return the installed legacy ZED configuration path."""
+        share = get_package_share_directory('sensors')
+        return os.path.join(share, 'config', 'zed_config.yaml')
 
-            if self.timestamp == sl.TIME_REFERENCE.IMAGE:
-                image_timestamp  =  self.zed.get_timestamp(sl.TIME_REFERENCE.IMAGE).get_nanoseconds()
-            elif self.timestamp == sl.TIME_REFERENCE.CURRENT:
-                image_timestamp = self.zed.get_timestamp(sl.TIME_REFERENCE.CURRENT).get_nanoseconds()
-            else:
-                image_timestamp =  self.get_clock().now().to_msg()
+    def _load_config(self):
+        """Read the legacy ZED YAML configuration."""
+        path = self._config_path()
+        with open(path, 'r', encoding='utf-8') as config_file:
+            config = yaml.safe_load(config_file)
+        if not isinstance(config, dict):
+            raise ValueError(f'ZED configuration must be a mapping: {path}')
+        return config
 
-            undistorted_img = cv2.undistort(frame_rgb, self.camera_k,  self.camera_distortion)
-            image_msg = self.bridge.cv2_to_imgmsg(undistorted_img, "bgr8") 
+    def _make_qos_profile(self):
+        """Construct the configured image QoS profile."""
+        qos = self.config['qos']
+        return QoSProfile(
+            reliability=getattr(ReliabilityPolicy, qos['reliability']),
+            history=getattr(HistoryPolicy, qos['history']),
+            depth=int(qos['depth']),
+        )
 
-            header = Header()
-            header.frame_id = self.config['ROS']['frame_id']
-            header.stamp = image_timestamp
+    def _make_camera_info(self):
+        """Build CameraInfo for the published raw, distorted left image."""
+        camera_info = CameraInfo()
+        camera_info.header.frame_id = self.config['ROS']['frame_id']
+        camera_info.height = int(self.config['camera']['height'])
+        camera_info.width = int(self.config['camera']['width'])
+        intrinsics = self.config['intrinsics']
+        camera_info.k = [float(value) for value in intrinsics['camera_matrix_K']]
+        camera_info.d = [float(value) for value in intrinsics['distortion']]
+        camera_info.r = [float(value) for value in intrinsics['rectification']]
+        camera_info.p = [float(value) for value in intrinsics['projection']]
+        camera_info.distortion_model = 'plumb_bob'
+        return camera_info
 
-            
-            image_msg.header = header
-            self.image_publisher.publish(image_msg)
+    def _capture_stamp(self):
+        """Return the configured ZED or ROS timestamp as a ROS message."""
+        if self._timestamp_source is None:
+            return self.get_clock().now().to_msg()
+        timestamp_ns = int(
+            self._zed.get_timestamp(self._timestamp_source).get_nanoseconds()
+        )
+        return Time(nanoseconds=timestamp_ns).to_msg()
 
-            # Publish camera info
-            self.camera_info.header.stamp = image_timestamp
-            self.camera_info_publisher.publish(self.camera_info)
-            # self.get_logger().info(f"Published image with timestamp: {header.stamp.sec}.{header.stamp.nanosec}")
+    def _publish_image(self):
+        """Grab and publish one unrectified ZED left image."""
+        if self._zed.grab() != sl.ERROR_CODE.SUCCESS:
+            self.get_logger().warning(
+                'ZED grab failed.', throttle_duration_sec=5.0
+            )
+            return
+        self._zed.retrieve_image(self._image, sl.VIEW.LEFT)
+        frame = np.asarray(self._image.get_data())
+        if frame.ndim != 3:
+            raise RuntimeError(f'Unexpected ZED frame shape: {frame.shape}')
+        if frame.shape[2] == 4:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+        elif frame.shape[2] != 3:
+            raise RuntimeError(f'Unexpected ZED frame shape: {frame.shape}')
+        frame = np.ascontiguousarray(frame)
 
-    def get_camera_info(self):
-        
-        self.camera_info.header.frame_id = self.config['ROS']['frame_id']
-        
-        self.camera_info.height = self.config['camera']['height']  
-        self.camera_info.width = self.config['camera']['width'] 
-        
-        # Set intrinsic matrix K
-        self.camera_info.k = self.config['intrinsics']['camera_matrix_K']
-    
-        # Distortion coefficients
-        self.camera_info.d = self.config['intrinsics']['distortion']
-        
-        # Rectification matrix (identity for monocular cameras)
-        self.camera_info.r = self.config['intrinsics']['rectification']
-        
-        # Projection matrix P
-        self.camera_info.p = self.config['intrinsics']['projection']
-        
-        self.camera_info.distortion_model = "plumb_bob"
-    
-        
-    
+        header = Header()
+        header.frame_id = self.config['ROS']['frame_id']
+        header.stamp = self._capture_stamp()
+        message = Image()
+        message.header = header
+        message.height, message.width, channels = frame.shape
+        message.encoding = 'bgr8'
+        message.is_bigendian = 0
+        message.step = message.width * channels
+        message.data = frame.tobytes()
+
+        self._camera_info.header = header
+        self._image_publisher.publish(message)
+        self._camera_info_publisher.publish(self._camera_info)
+
     def shutdown(self):
-        self.zed.close()
+        """Close the ZED device."""
+        self._zed.close()
+
 
 def main(args=None):
+    """Run the legacy ZED publisher."""
     rclpy.init(args=args)
-    zed_camera_publisher = ZEDCameraPublisher()
+    node = None
     try:
-        rclpy.spin(zed_camera_publisher)
+        node = ZEDCameraPublisher()
+        rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
-        zed_camera_publisher.shutdown()
-        zed_camera_publisher.destroy_node()
-        rclpy.shutdown()
+        if node is not None:
+            node.shutdown()
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()

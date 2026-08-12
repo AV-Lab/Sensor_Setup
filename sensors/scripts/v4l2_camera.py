@@ -1,5 +1,6 @@
 """V4L2 device discovery and configuration for the See3CAM publisher."""
 
+import math
 import os
 from pathlib import Path
 
@@ -7,6 +8,30 @@ import cv2
 
 
 DEFAULT_BY_ID_DIRECTORY = '/dev/v4l/by-id'
+STANDARD_CONTROL_PROPERTIES = {
+    'auto_exposure': cv2.CAP_PROP_AUTO_EXPOSURE,
+    'auto_white_balance': cv2.CAP_PROP_AUTO_WB,
+    'exposure': cv2.CAP_PROP_EXPOSURE,
+    'gain': cv2.CAP_PROP_GAIN,
+    'brightness': cv2.CAP_PROP_BRIGHTNESS,
+    'contrast': cv2.CAP_PROP_CONTRAST,
+    'saturation': cv2.CAP_PROP_SATURATION,
+    'sharpness': cv2.CAP_PROP_SHARPNESS,
+}
+
+
+def control_readback_matches(requested, actual):
+    """Return whether a finite control readback matches within two percent."""
+    requested = float(requested)
+    actual = float(actual)
+    tolerance = max(0.01, abs(requested) * 0.02)
+    return math.isfinite(actual) and abs(actual - requested) <= tolerance
+
+
+def _finite_readback(capture, property_id):
+    """Return a finite OpenCV control readback or ``None`` if unavailable."""
+    value = float(capture.get(property_id))
+    return value if math.isfinite(value) else None
 
 
 def discover_camera_device(model, by_id_directory=DEFAULT_BY_ID_DIRECTORY):
@@ -54,6 +79,8 @@ class V4L2Camera:
         self._controls = controls
         self._logger = logger
         self._capture = None
+        self.active_mode = None
+        self.active_controls = {}
 
         self.device = self._resolve_device()
         self._open()
@@ -121,6 +148,7 @@ class V4L2Camera:
                 self._capture.get(cv2.CAP_PROP_FOURCC)
             ),
         }
+        self.active_mode = actual
         self._logger.info(
             f'Camera mode: {actual["width"]}x{actual["height"]} at '
             f'{actual["fps"]:.3f} Hz, format={actual["format"]}, backend=V4L2'
@@ -169,6 +197,7 @@ class V4L2Camera:
     def _apply_standard_controls(self):
         """Apply optional controls that OpenCV exposes through V4L2."""
         if not self._controls.get('apply_standard_controls', False):
+            self._record_control_readback(set_call_accepted=False)
             self._logger.warning(
                 'Camera controls are disabled until the See3CAM controls are '
                 'verified with v4l2-ctl.'
@@ -202,6 +231,16 @@ class V4L2Camera:
             if self._controls.get(name) is not None:
                 self._set_control(name, property_id, self._controls[name])
 
+        # Archive readback for controls that were not explicitly written too.
+        for name, property_id in STANDARD_CONTROL_PROPERTIES.items():
+            if name not in self.active_controls:
+                self.active_controls[name] = {
+                    'requested': self._controls.get(name),
+                    'actual': _finite_readback(self._capture, property_id),
+                    'set_call_accepted': False,
+                    'readback_matches_request': None,
+                }
+
     def _set_control(self, name, property_id, value):
         """Set one standard control and report its effective value."""
         if not self._capture.set(property_id, float(value)):
@@ -210,9 +249,77 @@ class V4L2Camera:
                 'extension control.'
             )
         actual = self._capture.get(property_id)
+        matches = control_readback_matches(value, actual)
+        self.active_controls[name] = {
+            'requested': value,
+            'actual': float(actual),
+            'set_call_accepted': True,
+            'readback_matches_request': matches,
+        }
+        if not matches:
+            raise RuntimeError(
+                f'Camera {name} readback {actual!r} does not match the '
+                f'requested value {value!r}.'
+            )
         self._logger.info(
             f'Camera control {name}: requested={value}, actual={actual}'
         )
+
+    def _record_control_readback(self, set_call_accepted):
+        """Read standard V4L2 controls without claiming vendor verification."""
+        self.active_controls = {
+            name: {
+                'requested': self._controls.get(name),
+                'actual': _finite_readback(self._capture, property_id),
+                'set_call_accepted': set_call_accepted,
+                'readback_matches_request': None,
+            }
+            for name, property_id in STANDARD_CONTROL_PROPERTIES.items()
+        }
+
+    def _refresh_control_readback(self):
+        """Refresh all values after warm-up and recheck applied controls."""
+        for name, property_id in STANDARD_CONTROL_PROPERTIES.items():
+            entry = self.active_controls[name]
+            actual = _finite_readback(self._capture, property_id)
+            entry['actual'] = actual
+            if entry['set_call_accepted']:
+                entry['readback_matches_request'] = (
+                    actual is not None
+                    and control_readback_matches(entry['requested'], actual)
+                )
+                if not entry['readback_matches_request']:
+                    raise RuntimeError(
+                        f'Camera {name} changed after warm-up: requested '
+                        f'{entry["requested"]!r}, active {actual!r}.'
+                    )
+
+    def runtime_metadata(self):
+        """Return the resolved device, active mode, and control readback."""
+        self._refresh_control_readback()
+        return {
+            'backend': 'V4L2',
+            'configured_device': self._camera_config['device'],
+            'resolved_device': str(self.device),
+            'resolved_target': os.path.realpath(str(self.device)),
+            'active_mode': dict(self.active_mode or {}),
+            'controls_requested_for_application': bool(
+                self._controls.get('apply_standard_controls', False)
+            ),
+            'active_standard_controls': dict(self.active_controls),
+            'applied_standard_controls_verified': bool(
+                self._controls.get('apply_standard_controls', False)
+                and all(
+                    entry['readback_matches_request'] is True
+                    for entry in self.active_controls.values()
+                    if entry['set_call_accepted']
+                )
+            ),
+            'control_readback_limitation': (
+                'OpenCV exposes standard V4L2 properties only; e-con extension '
+                'controls require separate vendor/V4L2 verification.'
+            ),
+        }
 
     def _discard_warmup_frames(self):
         """Discard configured free-running frames before publication."""

@@ -1,7 +1,10 @@
 # Synchronized image/LiDAR capture for geometric calibration.
 ROS:
   image_topic_name: "/camera/image_raw"
+  camera_info_topic_name: "/camera/camera_info"
   pointcloud_topic_name: "/lidar_points"
+  camera_runtime_metadata_topic: "/camera/runtime_metadata"
+  lidar_runtime_metadata_topic: "/ouster/runtime_metadata"
   save_service_name: "/calibration_capture/save_pair"
 
 Sync:
@@ -21,8 +24,22 @@ Capture:
   max_pair_age_sec: 0.25
   min_point_count: 1000
   diagnostics_interval_sec: 5.0
+  # Fail closed unless the synchronized CameraInfo is calibrated and both
+  # publishers have supplied durable active-device metadata.
+  require_calibrated_camera_info: true
+  require_runtime_metadata: true
 
   # Relative paths are resolved from the directory where save_node is started.
   # Every run creates a new session and never overwrites a previous dataset.
   output_root: "calibration_data"
   session_name: "auto"
+
+ManualPreview:
+  # Manual-mode advisory only. Detection runs on a latest-only worker, so slow
+  # checkerboard analysis cannot block synchronization or the save service.
+  enabled: true
+  display: true
+  analysis_interval_sec: 0.5
+  # Relative paths resolve beside this save configuration.
+  calibration_config: "calibrate.yaml"
+  window_name: "Manual calibration capture preview"
