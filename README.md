@@ -5,8 +5,12 @@
 [![Ouster SDK](https://img.shields.io/badge/Ouster_SDK-0.15.1-lightred)](https://static.ouster.dev/sdk-docs/index.html)
 
 A ROS2 package for configuring, testing, and operating sensors:
-- 📸 ZED2 Camera (Monocular Mode)
+- 📸 See3CAM_24CUG V4L2 camera
+- 📸 ZED2 Camera (legacy/optional monocular path)
 - 🔄 Ouster OS-1 LiDAR
+
+For the staged Ouster/See3CAM clock, PTP, and external-trigger design, see the
+[sensor synchronization plan](SYNC.md).
 
 ## 📋 Table of Contents
 - [System Requirements](#-system-requirements)
@@ -23,13 +27,14 @@ A ROS2 package for configuring, testing, and operating sensors:
   - [ZED Camera Setup](#zed-camera-setup)
   - [Ouster LiDAR Setup](#ouster-lidar-setup)
 - [Sensor Calibration](#sensor-calibration)
+  - [Calibration Step by Step](#calibration-step-by-step)
   - [Data Collection Tips](#data-collection-tips)
   - [Camera Intrinsic Calibration](#camera-intrinsic-calibration)
     - [ROS2 Based Calibration](#ros2-based-calibration)
     - [MATLAB Based Calibration](#matlab-based-calibration)
   - [Camera-to-LiDAR Calibration](#camera-to-lidar-calibration)
-    - [Calibration with MATLAB](#2-matlab-based-calibration)
-    - [Interactive Refinement](#interactive-calibration-refinement)
+    - [Solve the Extrinsic](#solve-the-extrinsic)
+    - [Calibration Review](#calibration-review)
 
 - [Working with ROS2 Bags](#-working-with-ros2-bags)
   - [Recording](#recording)
@@ -41,7 +46,7 @@ A ROS2 package for configuring, testing, and operating sensors:
 ### Basic Requirements
 - **Operating System**: Ubuntu 22.04 LTS (Jammy Jellyfish)
 - **ROS2 Distribution**: Humble Hawksbill
-- **Python**: 3.10 or higher (tested with 3.10.12)
+- **Python**: 3.10 (tested with 3.10.12)
 - **CUDA**: 12.0 or higher (required for ZED SDK)
 - **Network**: Ethernet port for LiDAR connection
 
@@ -60,7 +65,7 @@ chmod +x zed_sdk.run
 ### Ouster SDK Installation
 Install using pip:
 ```bash
-pip3 install ouster-sdk
+pip3 install -r requirements.txt
 ```
 
 ### Network Configuration for Ouster LiDAR
@@ -91,7 +96,7 @@ colcon build && source install/setup.bash
 
 ### Launch Options
 
-Start all sensors with a single command (ouster and ZED):
+Start the Ouster and See3CAM publishers with a single command:
 ```bash
 ros2 launch sensors launch_all_sensors.py
 ```
@@ -116,17 +121,20 @@ ros2 run sensors camera_node --ros-args --remap use_sim_time:=false
 
 📊 **Synchronized Data Collection**
 - The first step in calibration is collecting synchronized data from all sensors
-- The save_node enables synchronized capture of image frames and pointcloud data
-- Data format: `.png` for images and `.pcd` for pointclouds
+- `save_node` approximately synchronizes image and point-cloud header stamps
+- Manual capture is the default: hold each checkerboard pose still and request
+  one pair
+- Images are saved as `.png`; point clouds are binary `.pcd` files retaining
+  `reflectivity` (or the source driver's `intensity` field)
+- Every run creates a non-overwriting session with timestamp/frame metadata
 
 #### Configuration
 - 📁 Update topic names in [`sensors/config/save_sample.yaml`](sensors/config/save_sample.yaml)
 - Configurable parameters include:
-  - Synchronization threshold
-  - Sample folder paths
-  - Delay between frames
-  - Number of samples
-  - Other sampling parameters
+  - Synchronization threshold and queue size
+  - Manual or non-blocking interval capture
+  - Minimum interval, fresh-pair age, and valid-point gates
+  - Output root and number of calibration poses
 
 #### Recording Synchronized Data
 ```bash
@@ -136,6 +144,46 @@ ros2 run sensors save_node --ros-args -p use_sim_time:=true
 # Real-time sampling
 ros2 run sensors save_node --ros-args -p use_sim_time:=false
 ```
+
+For the recommended manual workflow, wait until both topics are matching, hold
+the target still, and request one fresh pair:
+
+```bash
+ros2 service call /calibration_capture/save_pair std_srvs/srv/Trigger "{}"
+```
+
+Repeat for each distinct board pose. The default target is 40 poses. Output is
+written under:
+
+```text
+calibration_data/session_<UTC>/
+├── session.json       # saver plus requested sensor configurations
+├── manifest.jsonl     # one timestamp/frame/field record per complete pair
+├── summary.json       # matched, saved, rejected, and completion counters
+├── images/img_0000.png
+└── pcds/pc_0000.pcd
+```
+
+The service succeeds only after both files and the manifest record are written.
+It refuses stale, duplicate, too-close, wrong-frame, undersized, and malformed
+pairs. For each pose, vary board position, distance, yaw, pitch, and roll; many
+nearly identical frames do not improve calibration.
+
+Audit the completed session before moving it to another machine:
+
+```bash
+ros2 run sensors calibration_audit \
+  --session calibration_data/session_<UTC> \
+  --write-overlays
+```
+
+The report checks manifest integrity, synchronization, frame IDs, PCD validity,
+checkerboard detection, image sharpness/exposure, board coverage, estimated
+camera-frame board pose, and possible duplicate poses. It writes
+`quality_report.json` and, when requested, `quality_overlays/` inside the
+session. A passing result does not claim that the same board was automatically
+isolated in the LiDAR cloud; inspect that in the calibration solver or add a
+verified target-specific LiDAR selection stage.
 
 ⚠️ **Note**: Refer to [Working with ROS2 Bags](#-working-with-ros2-bags) section for detailed guidance on when and how to use `use_sim_time`.
 
@@ -172,7 +220,7 @@ The ZED camera operates in monocular mode using the left lens and publishes:
 
 - Compatible with OS-1 Ouster
 - 📁 Config file: [`sensors/config/ouster_config.yaml`](sensors/config/ouster_config.yaml)
-- Publishes `PointCloud2` messages (x, y, z, intensity)
+- Publishes `PointCloud2` messages (`x`, `y`, `z`, `reflectivity`)
 
 ⚠️ **Important Notes**:
 - Update LiDAR IP/hostname in config file
@@ -184,6 +232,316 @@ The ZED camera operates in monocular mode using the left lens and publishes:
 This implementation focuses on two key calibration procedures:
 - 📸 Camera intrinsic calibration
 - 🔄 Camera-to-LiDAR extrinsic calibration
+
+## Calibration Step by Step
+
+This is the canonical end-to-end workflow. The later sections explain each
+tool in more detail, but do not change this order.
+
+### Step 1: Fix the physical camera configuration
+
+Before calculating intrinsics, choose the final camera configuration in
+[`sensors/config/camera_config.yaml`](sensors/config/camera_config.yaml):
+
+- Resolution: `1920x1080`
+- Pixel format: `UYVY`
+- Frame rate: `20 Hz`
+- Final lens and focus position
+
+Connect the See3CAM and inspect the controls it actually exposes:
+
+```bash
+v4l2-ctl --list-devices
+v4l2-ctl -d "/dev/v4l/by-id/<actual-See3CAM-video-index0-name>" \
+  --list-ctrls-menus
+```
+
+Do not guess exposure-control values from another camera. Find usable values on
+the connected unit, then lock focus, exposure, gain, and white balance before
+collecting the final extrinsic dataset. Changing focus or resolution after the
+intrinsic calibration invalidates that intrinsic calibration.
+
+After confirming the camera-specific control names and ranges, the final
+calibration profile should look conceptually like this:
+
+```yaml
+controls:
+  apply_standard_controls: true
+  auto_exposure: false
+  auto_white_balance: false
+  exposure: <verified camera value>
+  gain: <verified camera value>
+```
+
+Do not copy the numeric exposure or gain from another device. Confirm the
+requested and active values in the publisher log.
+
+### Step 2: Build and start the camera
+
+From the ROS workspace root:
+
+```bash
+pip3 install -r src/requirements.txt  # adjust if the repo has another name
+colcon build --packages-select sensors
+source install/setup.bash
+ros2 run sensors camera_node --ros-args -p use_sim_time:=false
+```
+
+The camera publisher automatically selects the single matching See3CAM under
+`/dev/v4l/by-id`. Verify the final mode in its startup log.
+
+### Step 3: Calibrate and install camera intrinsics
+
+In another terminal, run the ROS camera calibrator using the exact number of
+inner corners and measured square size:
+
+```bash
+source install/setup.bash
+ros2 run camera_calibration cameracalibrator \
+  --size 8x6 \
+  --square 0.108 \
+  image:=/camera/image_raw \
+  camera:=/camera/camera_info
+```
+
+Replace the placeholder arrays in `camera_config.yaml` with the calibration
+result: `distortion`, `camera_matrix_K`, `rectification`, and `projection`.
+Then mark the result deliberately:
+
+```yaml
+intrinsics:
+  calibrated: true
+  distortion_model: "plumb_bob"
+  provenance:
+    method: "ros_camera_calibration"
+    calibrated_at_utc: "YYYY-MM-DDTHH:MM:SSZ"
+    rms_reprojection_error_px: null  # replace when the tool reports it
+    lens_focus_locked: true
+```
+
+Rebuild after editing an installed package configuration:
+
+```bash
+colcon build --packages-select sensors
+source install/setup.bash
+```
+
+Restart `camera_node` and verify that `CameraInfo.k[0]` is nonzero and that its
+width and height match the published images:
+
+```bash
+ros2 topic echo /camera/camera_info --once
+```
+
+The calibration audit and review tools intentionally refuse placeholder
+intrinsics.
+
+### Step 4: Measure and configure the calibration target
+
+Update [`sensors/config/calibrate.yaml`](sensors/config/calibrate.yaml):
+
+```yaml
+target:
+  type: "checkerboard"
+  inner_corners: [8, 6]   # columns first, then rows; not square count
+  square_size_m: 0.108    # physically measured, not nominal print size
+```
+
+Use a large, rigid, flat, matte target visible to both sensors. Measure several
+squares with a ruler or caliper and check that the printed pattern is not
+scaled differently in X and Y.
+
+### Step 5: Verify both live sensor streams
+
+Stop the standalone `camera_node` used for intrinsic calibration, then start
+both publishers:
+
+```bash
+ros2 launch sensors launch_all_sensors.py
+```
+
+Check the streams before saving anything:
+
+```bash
+ros2 topic hz /camera/image_raw
+ros2 topic hz /lidar_points
+ros2 topic echo /camera/camera_info --once
+ros2 topic echo /lidar_points --field header --once
+```
+
+Expected defaults are approximately 20 Hz for both topics, image frame
+`camera_optical_frame`, and LiDAR frame `os_sensor`. The current host-receipt
+timestamps are acceptable only because the target and sensor platform are held
+stationary for calibration.
+
+### Step 6: Capture a calibration session
+
+Use the manual capture mode in
+[`sensors/config/save_sample.yaml`](sensors/config/save_sample.yaml). You can
+pass the source configuration directly while developing, avoiding a rebuild:
+
+```bash
+ros2 run sensors save_node --ros-args \
+  -p use_sim_time:=false \
+  -p config_file:=/absolute/path/to/sensors/config/save_sample.yaml
+```
+
+For every target pose:
+
+1. Move the board to a new distance, image position, yaw, pitch, and roll.
+2. Make sure the full checkerboard is visible in the camera.
+3. Make sure the board surface is inside the LiDAR field of view.
+4. Hold the board and sensor platform still for several frames.
+5. Request exactly one fresh pair:
+
+```bash
+ros2 service call /calibration_capture/save_pair \
+  std_srvs/srv/Trigger "{}"
+```
+
+Collect approximately 30–40 diverse poses for solving. Then stop and restart
+`save_node` to create a separate validation session with roughly 8–12 new
+poses. Do not give the validation session to the solver.
+
+### Step 7: Audit both sessions locally
+
+Run the audit separately on the solver and held-out sessions:
+
+```bash
+ros2 run sensors calibration_audit \
+  --session calibration_data/session_<solver_UTC> \
+  --config /absolute/path/to/sensors/config/calibrate.yaml \
+  --write-overlays
+
+ros2 run sensors calibration_audit \
+  --session calibration_data/session_<validation_UTC> \
+  --config /absolute/path/to/sensors/config/calibrate.yaml \
+  --write-overlays
+```
+
+Inspect `quality_report.json` and `quality_overlays/`. Before solving, require:
+
+- No manifest, frame, timing, or PCD hard failures.
+- Checkerboard detection on every pair you plan to use.
+- No obviously blurred or overwhelmingly clipped board images.
+- Low duplicate-pose count.
+- Board centers distributed across the image.
+- Multiple distances and clearly different plane normals.
+
+`candidate_usable` does not prove that the board was hit in the LiDAR cloud.
+It means the image target, timing, frames, and general cloud passed. The board
+plane still must be isolated and visually verified in the extrinsic solver.
+
+### Step 8: Solve the LiDAR-camera extrinsic
+
+Choose one route:
+
+1. **MATLAB reference route:** move only the audited solver session to the
+   MATLAB machine and run `lidarCameraCalibrator`. Use only the indices marked
+   usable in the audit, and verify that the selected plane is the physical
+   board in every accepted PCD.
+2. **Local targetless route:** use
+   [direct_visual_lidar_calibration](https://github.com/koide3/direct_visual_lidar_calibration)
+   on the ROS2 machine. This is a different calibration method with its own
+   collection and input requirements; the current checkerboard audit does not
+   automatically prepare all of its inputs.
+3. **TIER IV route:** use
+   [CalibrationTools](https://github.com/tier4/CalibrationTools) when its larger
+   dependency and integration footprint is acceptable.
+
+This repository does not yet claim to contain a complete automatic Python
+extrinsic solver. OpenCV can detect the image target, but reliable LiDAR-board
+association must be tested on real sensor data before such a solver is trusted.
+
+### Step 9: Install the solved transform
+
+Determine the matrix direction returned by the selected solver. This repo
+requires:
+
+```text
+p_camera_optical = T_camera_lidar × p_os_sensor
+```
+
+If the solver returns the opposite direction, invert it before installation.
+Then update `calibrate.yaml`:
+
+```yaml
+extrinsic:
+  valid: true
+  method: "actual_solver_name"
+  source_frame: "os_sensor"
+  target_frame: "camera_optical_frame"
+  convention: "p_target = T_target_source * p_source"
+  translation_unit: "m"
+  matrix: [R11, R12, R13, tx,
+           R21, R22, R23, ty,
+           R31, R32, R33, tz,
+           0,   0,   0,   1]
+```
+
+The loader checks that this is a finite, right-handed, orthonormal rigid
+transform. `CameraInfo.P` is not the LiDAR-camera extrinsic.
+
+### Step 10: Review only on the held-out session
+
+Start in read-only mode:
+
+```bash
+ros2 run sensors calibration_review \
+  --session calibration_data/session_<validation_UTC> \
+  --config /absolute/path/to/sensors/config/calibrate.yaml
+```
+
+Use `n`, `p`, and `j <index>` to inspect every held-out pose. Check alignment
+at the image center and edges, at near and far distances, and on multiple board
+orientations.
+
+Only if the error is small and consistent may you test refinement:
+
+```bash
+ros2 run sensors calibration_review \
+  --session calibration_data/session_<validation_UTC> \
+  --config /absolute/path/to/sensors/config/calibrate.yaml \
+  --mode refine
+```
+
+Refinement never overwrites the accepted transform. `save` creates an
+unaccepted candidate containing the original matrix and total change. If the
+tool warns that the change is too large, rerun the solver or investigate
+intrinsics, frame direction, board selection, and timing.
+
+### Step 11: Publish and inspect the accepted TF
+
+After accepting and installing the final matrix:
+
+```bash
+ros2 run sensors calibration_tf --ros-args \
+  -p config_file:=/absolute/path/to/sensors/config/calibrate.yaml
+```
+
+In another terminal:
+
+```bash
+ros2 run tf2_ros tf2_echo os_sensor camera_optical_frame
+```
+
+The stored matrix maps LiDAR points into the camera frame. Because the TF tree
+uses `os_sensor` as parent, the publisher broadcasts the mathematically correct
+inverse for the parent-to-child TF edge.
+
+### Step 12: Acceptance and archiving
+
+Accept the calibration only when:
+
+- All held-out poses show consistent alignment.
+- Alignment does not drift systematically with image position or distance.
+- Repeating the solve with another diverse subset gives a similar transform.
+- Any manual adjustment is small and improves all held-out views, not one view.
+
+Archive the solver and validation session directories, quality reports, exact
+camera intrinsics, accepted extrinsic, requested sensor configurations, and
+software versions together. For moving-platform use, separately complete the
+PTP, exposure timestamp, and LiDAR deskew steps in [`SYNC.md`](SYNC.md).
 
 ## 🎯 Data Collection Tips
 
@@ -210,7 +568,7 @@ This implementation focuses on two key calibration procedures:
 ### Pro Tips
 - Check image exposure - avoid over/underexposed areas
 - Mark floor positions for repeatable captures
-- Test detection in MATLAB with a few samples before full collection
+- Run `calibration_audit` on a few samples before collecting the full dataset
 - Back up raw data before processing
 
 ## 🎥 Camera Intrinsic Calibration
@@ -279,108 +637,38 @@ Determines geometric transformation between sensors for point cloud projection.
 - 🔄 Rotation matrix (R)
 - 📏 Translation vector (t)
 
-### Calibration Workflow
+### Solve the Extrinsic
 
-#### 1. Data Collection
-```bash
-# Configure in save_sample.yaml first!
-ros2 run sensors save_node --ros-args -p use_sim_time:=false
+Follow Steps 7–9 in the canonical workflow above. MATLAB is the reference path
+for the current checkerboard dataset, while the linked ROS2 tools provide local
+alternatives with different input requirements. Regardless of solver, install
+only a matrix whose direction is explicitly:
+
+```text
+p_camera_optical = T_camera_lidar × p_os_sensor
 ```
 
-#### 2. MATLAB Based Calibration
-MATLAB can perform both intrinsic and extrinsic calibration together:
+The config loader rejects placeholders, malformed homogeneous matrices,
+non-orthonormal rotations, reflections, and non-finite values.
 
-1. Launch Calibrator:
-```matlab
-% Option 1: Command line
-lidarCameraCalibrator   % For both calibrations
+### Calibration Review
 
-% Option 2: Apps tab in MATLAB
-% Click 'Lidar Camera Calibrator'
-```
-
-2. Load and Process Data:
-   - Select synchronized image-pointcloud pairs
-   - Specify checkerboard dimensions
-   - Enter square size in meters
-
-3. Troubleshooting Detection:
-```matlab
-% If plane detection fails:
-% Manual plane selection:
-- Click 'Select Region' button
-- Draw polygon around checkerboard in pointcloud view
-- Adjust selection until plane is well-defined
-
-% Adjust detection parameters:
-- Open 'Settings'
-- Modify 'Plane Detection Threshold' (try range 0.01-0.1)
-- Adjust 'Refinement Parameters' if needed
-```
-
-4. Export Results:
-   - Click 'Export Parameters'
-   - Choose YAML format
-   - Save for ROS2 usage
-
-#### 3. Config Update
-```yaml
-projection: [P11, P12, P13, P14, P21, P22, P23, P24, P31, P32, P33, P34]
-```
-
-### Interactive Calibration Refinement
-
-#### Initial Setup
-Before using interactive_node, update initial parameters in calibrate.yaml:
-```yaml
-# sensors/config/calibrate.yaml
-transform:
-  # Update with initial intrinsic parameters (from ROS2 or MATLAB calibration)
-  intrinsic_k: [fx, 0, cx, 0, fy, cy, 0, 0, 1]
-  
-  # Update with initial extrinsic parameters (from MATLAB calibration)
-  lidar_camera: [R11, R12, R13, t1,
-                 R21, R22, R23, t2,
-                 R31, R32, R33, t3,
-                 0, 0, 0, 1]
-```
-
-#### Usage
-```bash
-ros2 run sensors interactive_node
-```
-
-#### Controls
-```
-Translation Controls:
-r - Move right     l - Move left
-u - Move up        d - Move down
-
-Rotation Controls:
-rl - Rotate left (Z-axis)    rr - Rotate right (Z-axis)
-ru - Rotate up (Y-axis)      rd - Rotate down (X-axis)
-
-Commands:
-s - Save current transformation
-n - Next image pair
-```
-
-#### Refinement Tips
-- Start with small adjustment values:
-  - Translation: try 0.01
-  - Rotation: try 0.001
-- Check alignment at different depths
-- Verify with multiple image pairs
-- Save progress frequently
+Follow Steps 10–11 above. Review mode is read-only; refinement mode creates an
+unaccepted candidate and never overwrites the solver output. Available review
+commands are `n`, `p`, `j <index>`, `matrix`, and `q`. Refinement adds
+`tx+/-`, `ty+/-`, `tz+/-`, `roll+/-`, `pitch+/-`, `yaw+/-`, `reset`, and
+`save`.
 
 ### Validation
-- 🎯 Check alignment at corners and edges
-- 📏 Verify at multiple distances
-- 🔄 Test with dynamic scenes
-- ⚡ Watch for temporal synchronization issues
-- 🔍 Look for consistent offsets
 
-Would you like me to adjust anything in this updated version?
+- Use static held-out board poses that were not used by the solver.
+- Check the image center and edges at multiple distances and orientations.
+- Repeat the full calibration and compare rotation and translation.
+- Treat depth-dependent overlay error as a possible intrinsic or translation
+  problem; do not hide it with a single-view manual adjustment.
+- Validate dynamic timing separately. Dynamic scenes are not a clean geometric
+  calibration check when the camera exposure time and LiDAR scan time differ.
+
 ## 📦 Working with ROS2 Bags
 
 ### Recording

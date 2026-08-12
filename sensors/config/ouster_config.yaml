@@ -1,27 +1,49 @@
-# ouster_config.yaml
-
 sensor:
-  host_name: 'os-122344000063.local' #'os-122130000681.local'  # Replace with your Ouster LiDAR IP os-122344000063.local/
+  host_name: "os-122344000063.local"
   udp_port_lidar: 7502
   udp_port_imu: 7503
+  # Runtime configuration is reapplied on every launch. Leave this false to
+  # avoid writing the same settings to persistent sensor storage each time.
+  persist_config: false
 
 lidar:
-  # fps: 20.0 taken from mode
-  frame_id: 'os_sensor'
-  azimuth_window: [0, 360000] #90000 ,270000# [start_angle, end_angle] in millidegrees  # [start_angle, end_angle] in millidegrees
-  phase_lock_enable: false # Allows sensor to consistently pass through a specific angle at a specific time on each rotation, False if TIME_FROM_INTERNAL_OSC ,
-  phase_lock_offset: 180000  # 180 degrees (front) in millidegrees
-  mode:  "1024x20"  #"512x20"      # Available modes:   # - "512x10" # - "512x20" # - "1024x10" -> Default  # - "1024x20" # - "2048x10"     
-  timestamp_mode: "System_Time" #"TIME_FROM_INTERNAL_OSC" # "TIME_FROM_PTP_1588" -> ptp based  # Use PTP for time synchronization 
-  "multipurpose_io_mode": "INPUT_NMEA_UART" # seconds register updates from NMEA $GPRMC message -> NMEA messages for absolute time reference
-  info_mode: "detailed" # minimal , empty -> setup info print  
+  frame_id: "os_sensor"
+  mode: "1024x20"
+  # Keep this full or non-wrapped. A window such as [350000, 10000] places
+  # its two valid segments nearly one revolution apart inside one LidarScan;
+  # proper use requires cross-frame stitching or per-point timestamps.
+  azimuth_window: [0, 360000]
+  phase_lock_enable: false
+  phase_lock_offset: 180000
 
+  # These are separate settings. timestamp_mode configures the physical clock
+  # inside the Ouster; ros_stamp_source selects the ROS PointCloud2 header time.
+  # This software-only setup is not synchronized between sensors. After PTP is
+  # deployed, use TIME_FROM_PTP_1588 and sensor_scan_midpoint instead.
+  timestamp_mode: "TIME_FROM_INTERNAL_OSC"
+  ros_stamp_source: "host_receipt"
+  # When PTP sensor timestamps are selected, publish only while the sensor
+  # reports SLAVE state, a grandmaster, and <=250 us master offset.
+  require_ptp_lock: true
+  # Ouster PTP measurement time uses the PTP/TAI timescale. ROS system time is
+  # Unix/UTC, currently 37 seconds behind TAI, so conversion adds -37 seconds.
+  # This is ignored unless PTP sensor_scan_midpoint stamping is selected. Use
+  # 0.0 only if the grandmaster explicitly supplies a UTC-like timebase.
+  ptp_utc_tai_offset: -37.0
+  # Reject converted PTP stamps on the wrong epoch. One second comfortably
+  # allows scan and transport latency while catching a missing 37-second shift.
+  max_ptp_ros_time_difference_sec: 1.0
+
+  # Drop packet-damaged full scans before XYZ conversion. This ratio is against
+  # all scan columns; reduce it deliberately when using a partial azimuth window.
+  min_scan_valid_columns_ratio: 0.95
+  multipurpose_io_mode: "OFF"
+  info_mode: "detailed"
 
 ROS:
-  topic_name: '/lidar_points'
-  queue_size: 5
+  topic_name: "/lidar_points"
 
 qos:
-  reliability: BEST_EFFORT  # Options: RELIABLE, BEST_EFFORT
-  history: KEEP_LAST  # Options: KEEP_LAST, KEEP_ALL
+  reliability: BEST_EFFORT
+  history: KEEP_LAST
   depth: 5

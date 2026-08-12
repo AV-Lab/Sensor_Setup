@@ -50,6 +50,12 @@ intrinsics:
   # See3CAM at the final resolution, lens, focus, and image mode, then set
   # calibrated=true. While false, the publisher emits CameraInfo with K[0]=0.
   calibrated: false
+  distortion_model: "plumb_bob"
+  provenance:
+    method: "placeholder"
+    calibrated_at_utc: null
+    rms_reprojection_error_px: null
+    lens_focus_locked: false
   distortion: [-0.309971, 0.077002, 0.007850, 0.002471, 0.000000]
   camera_matrix_K: [
     780.502801, 0.0, 933.156822,

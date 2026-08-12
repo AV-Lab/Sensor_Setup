@@ -8,8 +8,8 @@ from launch_ros.actions import Node
 def generate_launch_description():
     """Launch the live Ouster and generic V4L2 camera publishers."""
     return LaunchDescription([
-        # Live sensors use the PTP-disciplined system clock. Do not publish
-        # /clock unless running a simulator or rosbag with use_sim_time=true.
+        # Live nodes use real ROS time. The timestamp source is configured per
+        # sensor; the repository defaults are not cross-sensor synchronized.
         TimerAction(
             period=1.0,
             actions=[

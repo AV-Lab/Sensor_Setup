@@ -1,215 +1,372 @@
-import rclpy
-from rclpy.node import Node
-import pyzed.sl as sl
-import cv2
-import yaml
+"""Review a solved LiDAR-camera transform on captured calibration pairs."""
+
+import argparse
+from datetime import datetime, timezone
 import os
-import open3d as o3d
-from ament_index_python.packages import get_package_share_directory
+from pathlib import Path
+import sys
+import uuid
+
+import cv2
 import numpy as np
-from datetime import datetime
+import yaml
 
-class InteractiveCalibration(Node):
-    def __init__(self):
-        super().__init__('InteractiveCalibration')
-        # Load configuration
-        config_path = self.load_yaml_file()
-        with open(config_path, 'r') as config_file:
-            self.config = yaml.safe_load(config_file)
+from scripts.calibration_common import CalibrationError
+from scripts.calibration_common import default_config_path
+from scripts.calibration_common import load_calibration_bundle
+from scripts.calibration_common import load_session_pairs
+from scripts.calibration_common import project_points
+from scripts.calibration_common import read_pcd
+from scripts.calibration_common import transform_delta
+from scripts.calibration_common import validate_rigid_transform
 
-        self.Tr_lidar_to_cam = np.array(self.config['transform']['lidar_camera']).reshape(-1,4)
-        self.K = np.array(self.config['transform']['intrinsic_k']).reshape(-1,3)
-        self.img_folder = self.config['path']['img_folder']
-        self.pcd_folder = self.config['path']['pcd_folder']
 
-        self.process_samples()
-    
-    def load_yaml_file(self):
-        # Get the directory of the package's shared files
-        package_share_directory = get_package_share_directory('sensors')
-        
-        # Construct the path to 'zed_config.yaml' in the 'config' directory
-        config_file_path = os.path.join(package_share_directory, 'config', 'calibrate.yaml')
-        
-        return config_file_path
-    
-    def load_pcd(self,file_path):
-        pcd = o3d.io.read_point_cloud(file_path)
-        points = np.asarray(pcd.points)
-        # Add homogeneous coordinate
-        points = np.hstack((points, np.ones((points.shape[0], 1))))
+REFINEMENT_COMMANDS = {
+    'tx+': ('translation', 0, 1.0),
+    'tx-': ('translation', 0, -1.0),
+    'ty+': ('translation', 1, 1.0),
+    'ty-': ('translation', 1, -1.0),
+    'tz+': ('translation', 2, 1.0),
+    'tz-': ('translation', 2, -1.0),
+    'roll+': ('rotation', 0, 1.0),
+    'roll-': ('rotation', 0, -1.0),
+    'pitch+': ('rotation', 1, 1.0),
+    'pitch-': ('rotation', 1, -1.0),
+    'yaw+': ('rotation', 2, 1.0),
+    'yaw-': ('rotation', 2, -1.0),
+}
+
+
+def _rotation_about_axis(axis, angle_radians):
+    """Construct a right-handed rotation about one target-frame axis."""
+    vector = np.zeros(3, dtype=np.float64)
+    vector[axis] = angle_radians
+    rotation, _ = cv2.Rodrigues(vector)
+    return rotation
+
+
+def apply_refinement(transform, command, translation_step, rotation_step):
+    """Apply an explicit camera-frame translation or rotation increment."""
+    if command not in REFINEMENT_COMMANDS:
+        raise CalibrationError(f'Unknown refinement command {command!r}.')
+    kind, axis, sign = REFINEMENT_COMMANDS[command]
+    candidate = validate_rigid_transform(transform).copy()
+    if kind == 'translation':
+        candidate[axis, 3] += sign * translation_step
+    else:
+        increment = _rotation_about_axis(axis, sign * rotation_step)
+        candidate[:3, :3] = increment @ candidate[:3, :3]
+    return validate_rigid_transform(candidate)
+
+
+def _sample_points(points, maximum):
+    """Select a deterministic, uniform subset for responsive display."""
+    if points.shape[0] <= maximum:
         return points
+    indices = np.linspace(0, points.shape[0] - 1, maximum, dtype=np.int64)
+    return points[indices]
 
-    def project_points_to_image(self,points, K, Tr_lidar_to_cam):
-        # Transform points from lidar to camera coordinate
-        points_cam = Tr_lidar_to_cam @ points.T
-        
-        # Project to image plane
-        points_2d = K @ points_cam[:3, :]
-        points_2d = points_2d[:2, :] / points_2d[2, :]
-        
-        return points_2d.T
 
-    def overlay_points_on_image(self,image, points_2d):
-        overlay = image.copy()
-        for (u, v) in points_2d:
-            if 0 <= u < image.shape[1] and 0 <= v < image.shape[0]:
-                cv2.circle(overlay, (int(u), int(v)), 4, (0, 255, 0), -1)
-        return cv2.addWeighted(overlay, 0.5, image, 0.5, 0)
+def render_overlay(image, points, transform, camera, title_lines=()):
+    """Render a distortion-aware depth-coloured cloud on one raw image."""
+    pixels, depths, _ = project_points(points, transform, camera)
+    if image.shape[1] != camera.width or image.shape[0] != camera.height:
+        raise CalibrationError(
+            f'Image is {image.shape[1]}x{image.shape[0]}, but intrinsics are '
+            f'{camera.width}x{camera.height}.'
+        )
+    if not pixels.size:
+        visible_pixels = np.empty((0, 2), dtype=np.int32)
+        visible_depths = np.empty(0)
+    else:
+        finite = np.isfinite(pixels).all(axis=1)
+        visible = finite
+        visible &= pixels[:, 0] >= 0.0
+        visible &= pixels[:, 0] < camera.width
+        visible &= pixels[:, 1] >= 0.0
+        visible &= pixels[:, 1] < camera.height
+        visible_pixels = np.rint(pixels[visible]).astype(np.int32)
+        visible_pixels[:, 0] = np.clip(
+            visible_pixels[:, 0], 0, camera.width - 1
+        )
+        visible_pixels[:, 1] = np.clip(
+            visible_pixels[:, 1], 0, camera.height - 1
+        )
+        visible_depths = depths[visible]
 
-    def adjust_transformation(self,Tr_lidar_to_cam, adjustment, value):
-        adjustment_matrix = np.eye(4)
-        if adjustment in ['r', 'l', 'u', 'd']:
-            axis = {'r': 0, 'l': 0, 'u': 1, 'd': 1}[adjustment]
-            sign = 1 if adjustment in ['r', 'u'] else -1
-            adjustment_matrix[axis, 3] = sign * value
-        elif adjustment in ['rl', 'rr', 'ru', 'rd']:
-            axis = {'rl': 2, 'rr': 2, 'ru': 1, 'rd': 0}[adjustment]
-            angle = value if adjustment in ['rr', 'rd'] else -value
-            c, s = np.cos(angle), np.sin(angle)
-            if axis == 0:
-                adjustment_matrix[:3, :3] = [[1, 0, 0], [0, c, -s], [0, s, c]]
-            elif axis == 1:
-                adjustment_matrix[:3, :3] = [[c, 0, s], [0, 1, 0], [-s, 0, c]]
-            else:
-                adjustment_matrix[:3, :3] = [[c, -s, 0], [s, c, 0], [0, 0, 1]]
-        return adjustment_matrix @ Tr_lidar_to_cam
+    overlay = image.copy()
+    if visible_depths.size:
+        lower, upper = np.percentile(visible_depths, [2.0, 98.0])
+        scale = max(float(upper - lower), 1e-6)
+        normalized = np.clip((visible_depths - lower) / scale, 0.0, 1.0)
+        colors = cv2.applyColorMap(
+            np.rint(normalized * 255.0).astype(np.uint8),
+            cv2.COLORMAP_TURBO,
+        ).reshape(-1, 3)
+        x = visible_pixels[:, 0]
+        y = visible_pixels[:, 1]
+        overlay[y, x] = colors
+        overlay[np.clip(y + 1, 0, camera.height - 1), x] = colors
+        overlay[y, np.clip(x + 1, 0, camera.width - 1)] = colors
 
-    def update_display(self,image, points, Tr_lidar_to_cam):
-        points_2d = self.project_points_to_image(points, self.K, Tr_lidar_to_cam)
-        result = self.overlay_points_on_image(image, points_2d)
-        cv2.imshow('LiDAR Overlay', result)
+    result = cv2.addWeighted(image, 0.55, overlay, 0.75, 0.0)
+    lines = list(title_lines) + [f'visible points: {len(visible_depths)}']
+    for index, line in enumerate(lines):
+        origin = (20, 35 + 30 * index)
+        cv2.putText(
+            result,
+            str(line),
+            origin,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.75,
+            (0, 0, 0),
+            4,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            result,
+            str(line),
+            origin,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.75,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+    return result
+
+
+def validate_pair_frames(pair, source_frame, target_frame):
+    """Reject a dataset whose message frames contradict the calibration."""
+    lidar_frame = pair.get('lidar_frame_id')
+    image_frame = pair.get('image_frame_id')
+    if lidar_frame != source_frame:
+        raise CalibrationError(
+            f'Pair {pair["index"]} LiDAR frame is {lidar_frame!r}; '
+            f'calibration source is {source_frame!r}.'
+        )
+    if image_frame != target_frame:
+        raise CalibrationError(
+            f'Pair {pair["index"]} image frame is {image_frame!r}; '
+            f'calibration target is {target_frame!r}.'
+        )
+
+
+def save_candidate(output_directory, bundle, session, original, candidate):
+    """Write a non-overwriting refinement candidate with full provenance."""
+    output_directory = Path(output_directory)
+    output_directory.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc)
+    filename = timestamp.strftime(
+        'calibration_candidate_%Y%m%dT%H%M%S.%fZ.yaml'
+    )
+    destination = output_directory / filename
+    delta = transform_delta(original, candidate)
+    document = {
+        'schema_version': 2,
+        'candidate': {
+            'valid': False,
+            'status': 'manual_refinement_requires_acceptance',
+            'created_at_utc': timestamp.isoformat(),
+            'source_calibration_file': str(bundle.path),
+            'capture_session': str(session),
+            'source_frame': bundle.extrinsic.source_frame,
+            'target_frame': bundle.extrinsic.target_frame,
+            'convention': 'p_target = T_target_source * p_source',
+            'translation_unit': 'm',
+            'original_matrix': original.tolist(),
+            'matrix': candidate.tolist(),
+            'change_from_original': delta,
+        },
+    }
+    temporary = output_directory / (
+        f'.{filename}.tmp-{os.getpid()}-{uuid.uuid4().hex}'
+    )
+    try:
+        with temporary.open('x', encoding='utf-8') as stream:
+            yaml.safe_dump(document, stream, sort_keys=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination, delta
+
+
+class CalibrationReview:
+    """Drive the terminal-controlled offline overlay reviewer."""
+
+    def __init__(self, bundle, session, pairs, mode):
+        """Load review policy and initialize one global candidate transform."""
+        self.bundle = bundle
+        self.session = session
+        self.pairs = pairs
+        self.mode = mode
+        self.original = bundle.extrinsic.matrix.copy()
+        self.candidate = self.original.copy()
+        review = bundle.raw.get('review', {})
+        self.maximum_points = int(review.get('max_display_points', 50000))
+        self.translation_step = float(
+            review.get('translation_step_m', 0.001)
+        )
+        self.rotation_step = np.radians(
+            float(review.get('rotation_step_deg', 0.05))
+        )
+        self.warn_translation = float(
+            review.get('warn_translation_change_m', 0.02)
+        )
+        self.warn_rotation = float(
+            review.get('warn_rotation_change_deg', 0.5)
+        )
+        if self.maximum_points <= 0:
+            raise CalibrationError(
+                'review.max_display_points must be positive.'
+            )
+
+    def _load_pair(self, position):
+        """Read one manifest-selected image and PCD."""
+        pair = self.pairs[position]
+        validate_pair_frames(
+            pair,
+            self.bundle.extrinsic.source_frame,
+            self.bundle.extrinsic.target_frame,
+        )
+        image = cv2.imread(str(pair['image_path']), cv2.IMREAD_COLOR)
+        if image is None:
+            raise CalibrationError(f'Cannot decode {pair["image_path"]}.')
+        points = read_pcd(pair['pointcloud_path'], xyz_only=True)
+        return pair, image, _sample_points(points, self.maximum_points)
+
+    def _show(self, position):
+        """Display one pair under the current global transform."""
+        pair, image, points = self._load_pair(position)
+        delta = transform_delta(self.original, self.candidate)
+        lines = [
+            f'pair {position + 1}/{len(self.pairs)} '
+            f'(manifest index {pair["index"]})',
+            f'{self.bundle.extrinsic.source_frame} -> '
+            f'{self.bundle.extrinsic.target_frame}',
+            f'candidate change: {delta["translation_m"] * 1000:.1f} mm, '
+            f'{delta["rotation_deg"]:.3f} deg',
+        ]
+        result = render_overlay(
+            image,
+            points,
+            self.candidate,
+            self.bundle.camera,
+            lines,
+        )
+        cv2.imshow('LiDAR-camera calibration review', result)
         cv2.waitKey(1)
 
-    def save_transformation(self,Tr_lidar_to_cam, pair_number, filename='transformations.yaml'):
-        # Load existing transformations
-        if os.path.exists(filename):
-            with open(filename, 'r') as file:
-                data = yaml.safe_load(file) or {}
-        else:
-            data = {}
+    def run(self, start_index=0, output_directory=None):
+        """Process terminal commands until the user exits."""
+        position = min(max(start_index, 0), len(self.pairs) - 1)
+        output_directory = (
+            self.session / 'review_results'
+            if output_directory is None
+            else Path(output_directory)
+        )
+        cv2.namedWindow(
+            'LiDAR-camera calibration review', cv2.WINDOW_NORMAL
+        )
+        print('Commands: n, p, j <index>, reset, matrix, q')
+        if self.mode == 'refine':
+            print(
+                'Refinement: tx+/-, ty+/-, tz+/-, roll+/-, pitch+/-, '
+                'yaw+/-, save'
+            )
+            print(
+                'Translations and rotations are expressed in the target '
+                '(camera optical) frame.'
+            )
+        try:
+            while True:
+                self._show(position)
+                command = input('review> ').strip().lower()
+                if command in {'q', 'quit', 'exit'}:
+                    break
+                if command in {'n', 'next'}:
+                    position = min(position + 1, len(self.pairs) - 1)
+                elif command in {'p', 'previous'}:
+                    position = max(position - 1, 0)
+                elif command.startswith('j '):
+                    requested = int(command.split(maxsplit=1)[1])
+                    position = min(max(requested, 0), len(self.pairs) - 1)
+                elif command == 'matrix':
+                    print(self.candidate)
+                elif command == 'reset':
+                    self.candidate = self.original.copy()
+                elif command in REFINEMENT_COMMANDS:
+                    if self.mode != 'refine':
+                        print('Restart with --mode refine to make changes.')
+                        continue
+                    self.candidate = apply_refinement(
+                        self.candidate,
+                        command,
+                        self.translation_step,
+                        self.rotation_step,
+                    )
+                elif command == 'save':
+                    if self.mode != 'refine':
+                        print('Review mode cannot save a modified transform.')
+                        continue
+                    destination, delta = save_candidate(
+                        output_directory,
+                        self.bundle,
+                        self.session,
+                        self.original,
+                        self.candidate,
+                    )
+                    print(f'Saved unaccepted candidate: {destination}')
+                    if (
+                        delta['translation_m'] > self.warn_translation
+                        or delta['rotation_deg'] > self.warn_rotation
+                    ):
+                        print(
+                            'WARNING: adjustment exceeds the configured minor '
+                            'refinement limit; investigate or recalibrate.'
+                        )
+                elif command:
+                    print(f'Unknown command: {command}')
+        finally:
+            cv2.destroyAllWindows()
 
-        # Create a new entry for this transformation
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        new_entry = {
-            f"transformation_{timestamp}": {
-                "pair_number": pair_number,
-                "Tr_lidar_to_cam": Tr_lidar_to_cam.tolist()
-            }
-        }
 
-        # Append the new entry
-        data.update(new_entry)
-
-        # Save the updated data
-        with open(filename, 'w') as file:
-            yaml.dump(data, file)
-        print(f"Transformation for pair {pair_number} saved to {filename}")
-
-    def process_pair(self,image_path, pcd_path, Tr_lidar_to_cam, pair_number):
-        image = cv2.imread(image_path)
-        points = self.load_pcd(pcd_path)
-        
-        # Set the window size to match the image size
-        cv2.namedWindow('LiDAR Overlay', cv2.WINDOW_NORMAL)
-        cv2.resizeWindow('LiDAR Overlay', image.shape[1], image.shape[0])
-        
-        # Initial display
-        self.update_display(image, points, Tr_lidar_to_cam)
-        
-        while True:
-            choice = input("Adjust [r,l,u,d,rl,rr,ru,rd], save (s), or next (n)? ").lower()
-            
-            if choice == 's':
-                print("New Tr_lidar_to_cam:")
-                print(Tr_lidar_to_cam)
-                self.save_transformation(Tr_lidar_to_cam, pair_number)
-            elif choice == 'n':
-                print("Tr_lidar_to_cam:")
-                print(Tr_lidar_to_cam)
-                break
-            elif choice in ['r', 'l', 'u', 'd', 'rl', 'rr', 'ru', 'rd']:
-                value = float(input(f"Enter value for {choice}: "))
-                Tr_lidar_to_cam = self.adjust_transformation(Tr_lidar_to_cam, choice, value)
-                print("New Tr_lidar_to_cam:")
-                print(Tr_lidar_to_cam)
-                self.update_display(image, points, Tr_lidar_to_cam)
-            else:
-                print("Invalid choice. Please try again.")
-        
-        return Tr_lidar_to_cam
-    
-    def process_samples(self):
-        """
-        Process all image-pointcloud pairs from self.img_folder and self.pcd_folder
-        """
-        blank_image = None
-        first_image = True
-
-        # Ensure folders exist
-        if not os.path.exists(self.img_folder) or not os.path.exists(self.pcd_folder):
-            print(f"Error: One or both folders do not exist!")
-            print(f"Image folder: {self.img_folder}")
-            print(f"PCD folder: {self.pcd_folder}")
-            return
-
-        # Get list of all files in both directories
-        image_files = sorted([f for f in os.listdir(self.img_folder) if f.startswith('img_') and f.endswith('.png')])
-        pcd_files = sorted([f for f in os.listdir(self.pcd_folder) if f.startswith('pc_') and f.endswith('.pcd')])
-
-        # Verify we have matching pairs
-        num_pairs = min(len(image_files), len(pcd_files))
-        if num_pairs == 0:
-            print("No matching pairs found in the directories!")
-            print(f"Images found: {len(image_files)}")
-            print(f"PCDs found: {len(pcd_files)}")
-            return
-
-        print(f"Found {num_pairs} pairs to process")
-
-        # Process each pair
-        for i in range(num_pairs):
-            image_path = os.path.join(self.img_folder, image_files[i])
-            pcd_path = os.path.join(self.pcd_folder, pcd_files[i])
-
-            try:
-                print(f"Processing pair {i+1}/{num_pairs}: {image_files[i]} - {pcd_files[i]}")
-                self.Tr_lidar_to_cam = self.process_pair(image_path, pcd_path, self.Tr_lidar_to_cam, i)
-                
-                # Create blank image for visualization on first successful pair
-                if first_image:
-                    first_image = False
-                    img = cv2.imread(image_path)
-                    if img is not None:
-                        blank_image = np.zeros(img.shape, np.uint8)
-                    else:
-                        print(f"Warning: Could not read image {image_path}")
-            except Exception as e:
-                print(f"Error processing pair {i+1}/{num_pairs}: {str(e)}")
-                if blank_image is not None:
-                    cv2.imshow('LiDAR Overlay', blank_image)
-                    cv2.waitKey(1)
-                continue
-
-        print("\nProcessing complete!")
-        print("\nFinal transformation matrix:")
-        print(self.Tr_lidar_to_cam)
-        print("\nPress any key in the image window to exit.")
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
+def parse_arguments(arguments=None):
+    """Parse command-line options for the offline reviewer."""
+    parser = argparse.ArgumentParser(
+        description=(
+            'Review a solved LiDAR-camera transform on a capture session. '
+            'The default mode cannot modify calibration.'
+        )
+    )
+    parser.add_argument(
+        '--session', required=True, help='Capture session path'
+    )
+    parser.add_argument('--config', help='calibrate.yaml path')
+    parser.add_argument(
+        '--mode', choices=('review', 'refine'), default='review'
+    )
+    parser.add_argument('--start-index', type=int, default=0)
+    parser.add_argument('--output-dir')
+    return parser.parse_args(arguments)
 
 
 def main(args=None):
-    rclpy.init(args=args)
-    interactive_calibration = InteractiveCalibration()
+    """Run the calibration review command."""
+    options = parse_arguments(args)
     try:
-        rclpy.spin(interactive_calibration)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        interactive_calibration.shutdown()
-        interactive_calibration.destroy_node()
-        rclpy.shutdown()
+        config = options.config or default_config_path()
+        bundle = load_calibration_bundle(config, require_valid=True)
+        session, pairs = load_session_pairs(options.session)
+        review = CalibrationReview(bundle, session, pairs, options.mode)
+        review.run(options.start_index, options.output_dir)
+    except (CalibrationError, OSError, ValueError) as error:
+        print(f'calibration_review: {error}', file=sys.stderr)
+        return 2
+    return 0
+
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

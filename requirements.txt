@@ -1,3 +1,3 @@
-python=3.13
+# ROS Humble supplies Python 3.10, NumPy, OpenCV, and PyYAML via rosdep/apt.
+# Keep the sensor SDK pinned to the version this publisher is tested against.
 ouster-sdk==0.15.1
-open3d

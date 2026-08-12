@@ -1,5 +1,6 @@
 """Configuration loading and validation for the camera publisher."""
 
+import math
 import os
 
 from ament_index_python.packages import get_package_share_directory
@@ -88,6 +89,8 @@ def validate_camera_config(config):
 
     if not isinstance(intrinsics.get('calibrated'), bool):
         raise ValueError('intrinsics.calibrated must be true or false.')
+    if intrinsics.get('distortion_model') != 'plumb_bob':
+        raise ValueError('intrinsics.distortion_model must be plumb_bob.')
     lengths = {
         'camera_matrix_K': 9,
         'rectification': 9,
@@ -99,9 +102,51 @@ def validate_camera_config(config):
             raise ValueError(
                 f'intrinsics.{name} must contain {length} values.'
             )
+        _require_finite_values(values, f'intrinsics.{name}')
     distortion = intrinsics.get('distortion')
-    if not isinstance(distortion, list) or len(distortion) < 4:
-        raise ValueError('intrinsics.distortion needs at least four values.')
+    if not isinstance(distortion, list) or len(distortion) not in {
+        4, 5, 8, 12, 14,
+    }:
+        raise ValueError(
+            'intrinsics.distortion needs 4, 5, 8, 12, or 14 values.'
+        )
+    _require_finite_values(distortion, 'intrinsics.distortion')
+    if intrinsics['calibrated']:
+        provenance = intrinsics.get('provenance')
+        if not isinstance(provenance, dict):
+            raise ValueError(
+                'Calibrated intrinsics need a provenance mapping.'
+            )
+        method = provenance.get('method')
+        if (
+            not isinstance(method, str)
+            or not method
+            or method == 'placeholder'
+        ):
+            raise ValueError(
+                'Calibrated intrinsics need a non-placeholder '
+                'provenance.method.'
+            )
+        matrix = intrinsics['camera_matrix_K']
+        if matrix[0] <= 0.0 or matrix[4] <= 0.0:
+            raise ValueError(
+                'Calibrated camera focal lengths must be positive.'
+            )
+        if matrix[6:9] != [0.0, 0.0, 1.0]:
+            raise ValueError(
+                'intrinsics.camera_matrix_K must end with [0, 0, 1].'
+            )
+
+
+def _require_finite_values(values, name):
+    """Require a numeric finite calibration array."""
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        for value in values
+    ):
+        raise ValueError(f'{name} must contain only finite numbers.')
 
 
 def _require_integer(mapping, name, minimum, prefix):

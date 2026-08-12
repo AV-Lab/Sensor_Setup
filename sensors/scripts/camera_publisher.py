@@ -133,9 +133,8 @@ class CameraPublisher(Node):
         camera_info.header.frame_id = self.config['ROS']['frame_id']
         camera_info.height = self._camera_config['height']
         camera_info.width = self._camera_config['width']
-        camera_info.distortion_model = 'plumb_bob'
-
         intrinsics = self.config['intrinsics']
+        camera_info.distortion_model = intrinsics['distortion_model']
         if not intrinsics['calibrated']:
             self.get_logger().warning(
                 'Camera intrinsics are uncalibrated. CameraInfo K[0] remains '

@@ -1,13 +1,28 @@
-# Save Sampels
+# Synchronized image/LiDAR capture for geometric calibration.
 ROS:
-  image_topic_name: '/camera/image_raw'
-  pointcloud_topic_name: '/lidar_points'
+  image_topic_name: "/camera/image_raw"
+  pointcloud_topic_name: "/lidar_points"
+  save_service_name: "/calibration_capture/save_pair"
 
 Sync:
-  threshold: 0.067 # tolerace for synchronization in secs
-  img_folder: 'images'
-  pcd_folder: 'pcds'
-  total_samples: 200 # total number of samples to save
-  frame_delay: 2 # delay in frames between samples
-  set_delay: 3 # delay between sets in secs
-  set_size: 10 # number of samples in one set
+  # At 20 Hz, keep this at or below half the 50 ms frame period to reduce pairing
+  # ambiguity. Increase only after measuring the actual timestamp distribution.
+  threshold_sec: 0.025
+  queue_size: 20
+
+Capture:
+  # Manual is recommended: hold each distinct checkerboard pose still and call
+  # the Trigger service once. Interval mode saves automatically without sleeping
+  # inside a ROS callback.
+  mode: "manual"
+  total_samples: 40
+  min_interval_sec: 1.0
+  # A manual request refuses an old cached pair when either topic has stopped.
+  max_pair_age_sec: 0.25
+  min_point_count: 1000
+  diagnostics_interval_sec: 5.0
+
+  # Relative paths are resolved from the directory where save_node is started.
+  # Every run creates a new session and never overwrites a previous dataset.
+  output_root: "calibration_data"
+  session_name: "auto"

@@ -1,16 +1,50 @@
-transform:
-  lidar_camera : [0.0488892487827314, -0.997232737659554, -0.0560063236919779, 0.01227684, 
-                  -0.0775950736316721, 0.0521117757413948, -0.995622100687391, 0.383228561514729,
-                  0.995785542123180, 0.0530210313848098, -0.0748326421378761, 0.162531532105652,
-                  0.0, 0.0, 0.0, 1.0]
-  
-  intrinsic_k : [1108.145514, 0, 980.526233,
-                  0.0, 1109.205787, 546.265441,
-                  0.0, 0.0, 1.0]
-  
+# Offline calibration review and dataset-audit contract.
+schema_version: 2
 
-path:
-  img_folder: './images'
-  pcd_folder: './pcds'
+extrinsic:
+  # The matrix below is retained only as a visible placeholder from the older
+  # setup. Review and TF publication refuse to use it until a solved result is
+  # installed and this flag is deliberately changed to true.
+  valid: false
+  method: "placeholder"
+  source_frame: "os_sensor"
+  target_frame: "camera_optical_frame"
+  convention: "p_target = T_target_source * p_source"
+  translation_unit: "m"
+  matrix: [
+    0.0488892488, -0.9972327377, -0.0560063237, 0.0122768400,
+    -0.0775950736, 0.0521117757, -0.9956221007, 0.3832285615,
+    0.9957855421, 0.0530210314, -0.0748326421, 0.1625315321,
+    0.0, 0.0, 0.0, 1.0
+  ]
 
-# names of images should be img_xxx.png and pcd file names should be pc_xxx.pcd
+camera:
+  # Intrinsics, distortion, resolution, and validity have one source of truth.
+  config_file: "camera_config.yaml"
+
+target:
+  type: "checkerboard"
+  # OpenCV pattern size means inner corners: columns first, then rows.
+  inner_corners: [8, 6]
+  square_size_m: 0.108
+
+quality:
+  # These are screening thresholds, not calibration-error guarantees. Review
+  # the generated per-pair values and tune them for the final camera exposure.
+  max_abs_sync_delta_ms: 25.0
+  min_cloud_points: 1000
+  min_sharpness_variance: 80.0
+  # A checkerboard naturally contains dark and bright regions, so only flag
+  # frames where clipping dominates most of the detected-board crop.
+  max_dark_fraction: 0.65
+  max_bright_fraction: 0.65
+  min_board_image_fraction: 0.01
+  duplicate_translation_m: 0.10
+  duplicate_normal_angle_deg: 5.0
+
+review:
+  max_display_points: 50000
+  translation_step_m: 0.001
+  rotation_step_deg: 0.05
+  warn_translation_change_m: 0.02
+  warn_rotation_change_deg: 0.5
